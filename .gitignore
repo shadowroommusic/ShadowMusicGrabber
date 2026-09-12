@@ -1,0 +1,18 @@
+# 运行时产物
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# 构建产物
+build/
+dist/
+dist_*/
+
+# 本地工作/测试临时目录
+work/
+_ut_ncm/
+_ut_tmp/
+bin/*.log
+
+# 第三方二进制(体积大, 请按 README 自行放入 bin/)
+bin/beatportdl.exe

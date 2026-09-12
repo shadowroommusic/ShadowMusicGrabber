@@ -1,0 +1,5 @@
+yt-dlp>=2024.10.0
+customtkinter>=5.2.0
+gamdl>=3.8.0
+pycryptodome>=3.20.0
+mutagen>=1.47.0
