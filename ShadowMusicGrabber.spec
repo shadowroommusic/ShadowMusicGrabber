@@ -3,7 +3,7 @@ import os
 
 from PyInstaller.utils.hooks import collect_all
 
-datas = []
+datas = [('assets/icon.ico', 'assets')]
 binaries = []
 # beatportdl.exe 是第三方下载器, 不随仓库分发; 本地存在时才打包进 EXE。
 _beatportdl = os.path.join("bin", "beatportdl.exe")
@@ -46,6 +46,7 @@ exe = EXE(
     a.datas,
     [],
     name='ShadowMusicGrabber',
+    icon='assets/icon.ico',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

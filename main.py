@@ -26,7 +26,7 @@ import premium
 import updater
 
 APP_NAME = "Shadow MusicGrabber"
-APP_VERSION = "1.6.0"
+APP_VERSION = "1.7.0"
 
 # 界面语言：先读已保存的设置，否则按系统语言；控件在构造时由 i18n 统一翻译。
 i18n.install()
@@ -60,6 +60,12 @@ FORMAT_ORDER = [
     downloader.FormatKind.MP3,
     downloader.FormatKind.ORIGINAL,
 ]
+
+
+def resource_path(*parts: str) -> str:
+    """定位随程序分发的资源（源码运行与 PyInstaller 打包都能用）。"""
+    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, *parts)
 
 
 def task_label(task) -> str:
@@ -118,6 +124,7 @@ class App(ctk.CTk):
         self.title(f"{APP_NAME} v{APP_VERSION} · {i18n.tr('音乐抓取与无损转码工具')}")
         self.geometry("1120x820")
         self.minsize(960, 700)
+        self._apply_window_icon()
 
         self.default_out_dir = os.path.join(os.path.expanduser("~"), "Music", "ShadowMusicGrabber")
         self.tasks: list[downloader.DownloadTask] = []
@@ -1108,6 +1115,16 @@ class App(ctk.CTk):
                 self.ui_queue.put(("log", f"✗ 转码失败: {task.src} -> {e}"))
             self.ui_queue.put(("cv_total", (i + 1) / total))
             self._end_job("convert")
+
+    # ---------- 窗口图标 ----------
+    def _apply_window_icon(self):
+        icon = resource_path("assets", "icon.ico")
+        if not os.path.isfile(icon):
+            return
+        try:
+            self.iconbitmap(icon)
+        except tk.TclError:
+            pass
 
     # ---------- 界面语言 ----------
     def _toggle_language(self):

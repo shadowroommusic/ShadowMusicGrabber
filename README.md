@@ -8,6 +8,8 @@ A Windows desktop toolbox with four independent modules: public link downloading
 
 > 合法使用：只处理你拥有或明确获授权的内容。程序不绕过 DRM、订阅、地区限制、访问控制或加密壳。Apple Music / Beatport 的下载结果和可用音质由你的账号权限、地区和第三方工具决定。
 
+应用图标：纯黑圆角底 + 白色 S，由 `tools/make_icon.py` 生成（改参数即可重画）。
+
 ## 下载与安装
 
 ### 方式一：直接使用打包版本（推荐）
@@ -102,6 +104,8 @@ ShadowMusicGrabber/
 ├── ncm_decrypt.py             # 网易云 .ncm 本地还原
 ├── premium.py                 # gamdl / beatportdl 授权调用
 ├── ShadowMusicGrabber.spec    # PyInstaller 配置
+├── assets/                    # 图标(icon.png / icon.ico)
+├── tools/make_icon.py         # 图标生成脚本
 ├── bin/                       # 可选第三方工具(beatportdl.exe)
 ├── tests/                     # 单元测试
 └── LICENSE                    # MIT
