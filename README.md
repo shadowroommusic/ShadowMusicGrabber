@@ -4,7 +4,6 @@
 
 Windows 桌面工具，四个彼此独立的工作模块：公开链接下载、本地音频转码、网易云 NCM 文件还原，以及需要用户自己订阅和账号的 Apple Music / Beatport 下载。深色极简界面，**支持中英文双语**，内置 GitHub Releases 自动更新。
 
-[![Release](https://github.com/shadowroommusic/ShadowMusicGrabber/actions/workflows/release.yml/badge.svg)](https://github.com/shadowroommusic/ShadowMusicGrabber/actions/workflows/release.yml)
 [![Latest release](https://img.shields.io/github/v/release/shadowroommusic/ShadowMusicGrabber?label=release)](https://github.com/shadowroommusic/ShadowMusicGrabber/releases/latest)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
@@ -95,20 +94,16 @@ pyinstaller --noconfirm --clean ShadowMusicGrabber.spec
 
 生成物为 `dist\ShadowMusicGrabber.exe`。spec 会收集 yt-dlp、customtkinter、gamdl、Crypto、mutagen；`bin\beatportdl.exe` 存在时一并打包。FFmpeg 不复制进 EXE，请确保目标机器可找到它，或把 `ffmpeg.exe` / `ffprobe.exe` 放在 EXE 同目录。
 
-## 发布新版本（自动）
+## 发布新版本
 
-改完版本号推个 tag，剩下的交给 GitHub Actions：
+1. 修改 `main.py` 里的 `APP_VERSION`（例如 `1.7.2`）。
+2. 跑测试：`python -m unittest discover tests`。
+3. 打包：`python -m PyInstaller --noconfirm --clean ShadowMusicGrabber.spec`。
+4. 在 GitHub 建一个**同名 tag** 的 Release（例如 `v1.7.2`），把 `dist\ShadowMusicGrabber.exe` 传上去。
 
-```powershell
-# 1) 把 main.py 里的 APP_VERSION 改成新版本号，例如 1.7.1
-# 2) 提交并打 tag（tag 必须与 APP_VERSION 一致）
-git commit -am "v1.7.1"
-git tag v1.7.1
-git push origin main --tags
-```
-
-`.github/workflows/release.yml` 会依次：安装依赖 → 跑单元测试 → 校验 `APP_VERSION` 与 tag 一致 → PyInstaller 打包 → 创建 Release 并上传 `ShadowMusicGrabber.exe`。
-也可以在仓库 Actions 页面手动运行该工作流（勾选 `dry_run` 时只构建、不发布）。
+> 程序内的「检查更新」只看 Releases，所以版本号、tag、Release 三者保持一致即可。
+> 想改成自动化（推 tag 自动跑测试+打包+发布）也可以：在 `.github/workflows/` 放一个 `on: push: tags: ["v*"]` 的工作流即可，
+> 但用于推送的 token 需要额外勾选 `workflow` 权限。
 
 ## 测试
 

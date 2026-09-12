@@ -81,13 +81,14 @@ class TestDownloadErrors(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "same.flac"
             path.write_bytes(b"old")
-            # 统一用 resolve() 后的路径，避免 CI 上 %TEMP% 的 8.3 短名(RUNNER~1)导致字符串不一致
-            resolved = str(path.resolve())
+            # 用与实现一致的 abspath 归一化：CI 的 %TEMP% 是 8.3 短名(RUNNER~1)，
+            # resolve() 会把它展开成长路径，导致 before 与候选路径对不上。
+            normalized = os.path.abspath(str(path))
             task = downloader.DownloadTask(
                 url="https://a.com/x", out_dir=tmp, fmt=downloader.FormatKind.FLAC
             )
-            info = {"filepath": resolved}
-            self.assertEqual(downloader._find_output(task, info, before={resolved}), "")
+            info = {"filepath": normalized}
+            self.assertEqual(downloader._find_output(task, info, before={normalized}), "")
 
 
 if __name__ == "__main__":
