@@ -32,6 +32,16 @@ class TestUrlDetection(unittest.TestCase):
 
 
 class TestBeatportdlDiscovery(unittest.TestCase):
+    @unittest.skipUnless(
+        os.path.isfile(
+            os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                "bin",
+                "beatportdl.exe",
+            )
+        ),
+        "仓库不包含第三方 beatportdl.exe，从源码树找不到时跳过",
+    )
     def test_bundled_bin_exists(self):
         exe = premium._find_beatportdl()
         self.assertIsNotNone(exe, "应能找到 beatportdl")

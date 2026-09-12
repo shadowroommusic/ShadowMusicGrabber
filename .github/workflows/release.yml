@@ -29,6 +29,14 @@ jobs:
           python-version: "3.12"
           cache: pip
 
+      - name: Install ffmpeg
+        shell: pwsh
+        run: |
+          choco install ffmpeg --no-progress -y
+          # choco 改的是机器级 PATH，当前会话要重新读取一次
+          $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+          ffmpeg -version | Select-Object -First 1
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
