@@ -1,6 +1,18 @@
 # Shadow MusicGrabber
 
+<img src="assets/icon.png" width="104" align="right" alt="app icon">
+
 Windows 桌面工具，四个彼此独立的工作模块：公开链接下载、本地音频转码、网易云 NCM 文件还原，以及需要用户自己订阅和账号的 Apple Music / Beatport 下载。深色极简界面，**支持中英文双语**，内置 GitHub Releases 自动更新。
+
+[![Release](https://github.com/shadowroommusic/ShadowMusicGrabber/actions/workflows/release.yml/badge.svg)](https://github.com/shadowroommusic/ShadowMusicGrabber/actions/workflows/release.yml)
+[![Latest release](https://img.shields.io/github/v/release/shadowroommusic/ShadowMusicGrabber?label=release)](https://github.com/shadowroommusic/ShadowMusicGrabber/releases/latest)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
+## 界面预览 / Screenshots
+
+| 中文界面 | English UI |
+| --- | --- |
+| ![中文界面](docs/screenshot-zh.png) | ![English UI](docs/screenshot-en.png) |
 
 A Windows desktop toolbox with four independent modules: public link downloading, local audio conversion, NetEase Cloud Music `.ncm` decryption, and Apple Music / Beatport downloading for accounts you own. Dark minimal UI with **Chinese/English interface** and built-in GitHub Releases auto-update.
 
@@ -82,6 +94,21 @@ pyinstaller --noconfirm --clean ShadowMusicGrabber.spec
 ```
 
 生成物为 `dist\ShadowMusicGrabber.exe`。spec 会收集 yt-dlp、customtkinter、gamdl、Crypto、mutagen；`bin\beatportdl.exe` 存在时一并打包。FFmpeg 不复制进 EXE，请确保目标机器可找到它，或把 `ffmpeg.exe` / `ffprobe.exe` 放在 EXE 同目录。
+
+## 发布新版本（自动）
+
+改完版本号推个 tag，剩下的交给 GitHub Actions：
+
+```powershell
+# 1) 把 main.py 里的 APP_VERSION 改成新版本号，例如 1.7.1
+# 2) 提交并打 tag（tag 必须与 APP_VERSION 一致）
+git commit -am "v1.7.1"
+git tag v1.7.1
+git push origin main --tags
+```
+
+`.github/workflows/release.yml` 会依次：安装依赖 → 跑单元测试 → 校验 `APP_VERSION` 与 tag 一致 → PyInstaller 打包 → 创建 Release 并上传 `ShadowMusicGrabber.exe`。
+也可以在仓库 Actions 页面手动运行该工作流（勾选 `dry_run` 时只构建、不发布）。
 
 ## 测试
 

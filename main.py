@@ -26,7 +26,7 @@ import premium
 import updater
 
 APP_NAME = "Shadow MusicGrabber"
-APP_VERSION = "1.7.0"
+APP_VERSION = "1.7.1"
 
 # 界面语言：先读已保存的设置，否则按系统语言；控件在构造时由 i18n 统一翻译。
 i18n.install()
