@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
 """GitHub Releases 自动更新。
 
-更新源固定为本项目仓库，只从该仓库的最新 Release 下载资产，避免任意 URL
-被当作更新包安装。仅打包后的 exe 支持就地替换；源码运行时改为打开下载页。
+更新源固定为本项目仓库，只从该仓库的 Release 下载资产，避免任意 URL 被当作
+更新包安装。默认走 GitHub API；当 API 被限流（未登录时每小时 60 次）或不可用时，
+退回网页跳转方式读取最新 tag，并使用仓库固定的 latest 下载地址。
+仅打包后的 exe 支持就地替换；源码运行时改为打开下载页。
 """
 
 from __future__ import annotations
@@ -19,6 +21,9 @@ import urllib.request
 REPO = "shadowroommusic/MusicGrabber"
 API_LATEST_RELEASE = f"https://api.github.com/repos/{REPO}/releases/latest"
 RELEASES_PAGE = f"https://github.com/{REPO}/releases"
+LATEST_PAGE = f"https://github.com/{REPO}/releases/latest"
+LATEST_ASSET_URL = f"https://github.com/{REPO}/releases/latest/download/MusicGrabber.exe"
+ASSET_NAME = "MusicGrabber.exe"
 USER_AGENT = "MusicGrabber-Updater"
 TIMEOUT = 20
 _CHUNK = 256 * 1024
@@ -35,11 +40,11 @@ class UpdateInfo:
         self,
         *,
         tag: str,
-        name: str,
-        notes: str,
-        asset_name: str,
-        asset_url: str,
-        asset_size: int,
+        name: str = "",
+        notes: str = "",
+        asset_name: str = "",
+        asset_url: str = "",
+        asset_size: int = 0,
     ):
         self.tag = tag
         self.name = name
@@ -70,6 +75,14 @@ def can_self_update() -> bool:
     return bool(getattr(sys, "frozen", False)) and os.name == "nt"
 
 
+def _http_error_message(code: int) -> str:
+    if code == 404:
+        return "更新仓库还没有发布任何 Release。"
+    if code in (403, 429):
+        return "更新服务暂时限制了访问频率，请稍后再试。"
+    return f"更新服务返回 HTTP {code}。"
+
+
 def _get_json(url: str) -> dict:
     request = urllib.request.Request(
         url, headers={"User-Agent": USER_AGENT, "Accept": "application/vnd.github+json"}
@@ -78,9 +91,7 @@ def _get_json(url: str) -> dict:
         with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
             return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
-        if exc.code == 404:
-            raise UpdateError("更新仓库还没有发布任何 Release。") from exc
-        raise UpdateError(f"更新服务返回 HTTP {exc.code}。") from exc
+        raise UpdateError(_http_error_message(exc.code)) from exc
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         raise UpdateError(f"无法连接更新服务: {exc}") from exc
     except json.JSONDecodeError as exc:
@@ -106,8 +117,7 @@ def _select_asset(assets: list) -> dict | None:
     return ranked[0][2]
 
 
-def check_for_update(current_version: str) -> UpdateInfo | None:
-    """返回可下载的新版本；已是最新时返回 None。"""
+def _check_via_api(current_version: str) -> UpdateInfo | None:
     data = _get_json(API_LATEST_RELEASE)
     tag = str(data.get("tag_name") or data.get("name") or "").strip()
     if not tag or not is_newer(tag, current_version):
@@ -123,6 +133,42 @@ def check_for_update(current_version: str) -> UpdateInfo | None:
     )
 
 
+def _latest_tag_via_web() -> str:
+    """读取 releases/latest 的最终跳转地址，得到最新 tag（不受 API 限额影响）。"""
+    request = urllib.request.Request(
+        LATEST_PAGE, headers={"User-Agent": USER_AGENT}, method="HEAD"
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
+            final = str(response.geturl() or "")
+    except urllib.error.HTTPError as exc:
+        raise UpdateError(_http_error_message(exc.code)) from exc
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise UpdateError(f"无法连接更新服务: {exc}") from exc
+    tail = final.rstrip("/").rsplit("/", 1)[-1]
+    return tail if tail and tail != "latest" else ""
+
+
+def check_for_update(current_version: str) -> UpdateInfo | None:
+    """返回可下载的新版本；已是最新时返回 None。"""
+    api_error: UpdateError | None = None
+    try:
+        return _check_via_api(current_version)
+    except UpdateError as exc:
+        api_error = exc
+
+    # API 限流或异常时退回网页方式；仍失败则汇报最初的错误。
+    try:
+        tag = _latest_tag_via_web()
+    except UpdateError:
+        if api_error is not None:
+            raise api_error
+        raise
+    if not tag or not is_newer(tag, current_version):
+        return None
+    return UpdateInfo(tag=tag, asset_name=ASSET_NAME, asset_url=LATEST_ASSET_URL)
+
+
 def download_update(
     info: UpdateInfo, on_progress=None, dest_dir: str | None = None
 ) -> str:
@@ -131,7 +177,7 @@ def download_update(
         raise UpdateError("这个 Release 没有可下载的 exe/zip 资产。")
     target_dir = dest_dir or os.path.join(tempfile.gettempdir(), "MusicGrabber-update")
     os.makedirs(target_dir, exist_ok=True)
-    filename = info.asset_name or os.path.basename(info.asset_url) or "MusicGrabber.exe"
+    filename = info.asset_name or os.path.basename(info.asset_url) or ASSET_NAME
     target = os.path.join(target_dir, filename)
     request = urllib.request.Request(info.asset_url, headers={"User-Agent": USER_AGENT})
     try:
