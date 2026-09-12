@@ -45,7 +45,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='MusicGrabber',
+    name='ShadowMusicGrabber',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

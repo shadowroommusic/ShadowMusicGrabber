@@ -84,9 +84,25 @@ def _find_beatportdl() -> Optional[str]:
     return shutil.which("beatportdl")
 
 
+APP_DIR_NAME = "ShadowMusicGrabber"
+_LEGACY_DIR_NAME = "MusicGrabber"
+
+
 def _app_data_dir() -> str:
+    """运行配置（如 BeatportDL 配置）的保存目录。
+
+    应用改名为 Shadow MusicGrabber 后，首次运行会把旧目录的配置迁过来，
+    避免用户重新填写账号。
+    """
     root = os.environ.get("APPDATA") or os.path.join(os.path.expanduser("~"), ".config")
-    path = os.path.join(root, "MusicGrabber")
+    path = os.path.join(root, APP_DIR_NAME)
+    legacy = os.path.join(root, _LEGACY_DIR_NAME)
+    if not os.path.isdir(path) and os.path.isdir(legacy):
+        try:
+            shutil.copytree(legacy, path)
+            return path
+        except OSError:
+            pass
     os.makedirs(path, exist_ok=True)
     return path
 

@@ -18,12 +18,12 @@ import tempfile
 import urllib.error
 import urllib.request
 
-REPO = "shadowroommusic/MusicGrabber"
+REPO = "shadowroommusic/ShadowMusicGrabber"
 API_LATEST_RELEASE = f"https://api.github.com/repos/{REPO}/releases/latest"
 RELEASES_PAGE = f"https://github.com/{REPO}/releases"
 LATEST_PAGE = f"https://github.com/{REPO}/releases/latest"
-LATEST_ASSET_URL = f"https://github.com/{REPO}/releases/latest/download/MusicGrabber.exe"
-ASSET_NAME = "MusicGrabber.exe"
+LATEST_ASSET_URL = f"https://github.com/{REPO}/releases/latest/download/ShadowMusicGrabber.exe"
+ASSET_NAME = "ShadowMusicGrabber.exe"
 USER_AGENT = "MusicGrabber-Updater"
 TIMEOUT = 20
 _CHUNK = 256 * 1024

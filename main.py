@@ -20,12 +20,17 @@ import customtkinter as ctk
 
 import converter
 import downloader
+import i18n
 import ncm_decrypt
 import premium
 import updater
 
-APP_TITLE = "音乐抓取与无损转码工具"
-APP_VERSION = "1.5.0"
+APP_NAME = "Shadow MusicGrabber"
+APP_VERSION = "1.6.0"
+
+# 界面语言：先读已保存的设置，否则按系统语言；控件在构造时由 i18n 统一翻译。
+i18n.install()
+i18n.load_language()
 
 # Shadowroom-inspired visual language: near-black canvas, quiet panels, and a
 # single acid-lime action color for controls that start work.
@@ -110,11 +115,11 @@ class App(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.configure(fg_color=APP_BG)
-        self.title(f"{APP_TITLE} v{APP_VERSION}")
+        self.title(f"{APP_NAME} v{APP_VERSION} · {i18n.tr('音乐抓取与无损转码工具')}")
         self.geometry("1120x820")
         self.minsize(960, 700)
 
-        self.default_out_dir = os.path.join(os.path.expanduser("~"), "Music", "MusicGrabber")
+        self.default_out_dir = os.path.join(os.path.expanduser("~"), "Music", "ShadowMusicGrabber")
         self.tasks: list[downloader.DownloadTask] = []
         self.task_rows: list[TaskRow] = []
         self.ui_queue: queue.Queue = queue.Queue()
@@ -206,8 +211,8 @@ class App(ctk.CTk):
         try:
             os.makedirs(path, exist_ok=True)
         except OSError as exc:
-            messagebox.showerror("无法使用输出目录", f"{purpose}无法创建输出目录:\n{path}\n\n{exc}")
-            self._log(f"✗ {purpose}输出目录不可用: {path} -> {exc}")
+            messagebox.showerror("无法使用输出目录", f"{i18n.tr(purpose)}无法创建输出目录:\n{path}\n\n{exc}")
+            self._log(f"✗ {i18n.tr(purpose)}输出目录不可用: {path} -> {exc}")
             return ""
         return path
 
@@ -224,17 +229,17 @@ class App(ctk.CTk):
             else:
                 subprocess.Popen(["xdg-open", path])
         except OSError as exc:
-            messagebox.showerror("无法打开目录", f"{purpose}目录打开失败:\n{path}\n\n{exc}")
-            self._log(f"✗ 无法打开{purpose}目录: {path} -> {exc}")
+            messagebox.showerror("无法打开目录", f"{i18n.tr(purpose)}目录打开失败:\n{path}\n\n{exc}")
+            self._log(f"✗ 无法打开{i18n.tr(purpose)}目录: {path} -> {exc}")
 
     def _require_idle(self, name: str, label: str) -> bool:
         if name not in self._running_jobs:
             return True
-        messagebox.showinfo("任务进行中", f"{label}正在运行。请等待当前批次完成后再修改队列。")
+        messagebox.showinfo("任务进行中", f"{i18n.tr(label)}正在运行。请等待当前批次完成后再修改队列。")
         return False
 
     def _selected_download_format(self) -> downloader.FormatKind:
-        value = self.fmt_var.get()
+        value = i18n.untr(self.fmt_var.get())
         for fmt, label in FORMAT_LABELS.items():
             if value == label or value == fmt.value:
                 return fmt
@@ -256,7 +261,7 @@ class App(ctk.CTk):
         header.pack(fill="x", padx=18, pady=(14, 0))
         ctk.CTkLabel(
             header,
-            text="MUSICGRABBER",
+            text=APP_NAME.upper(),
             anchor="w",
             font=ctk.CTkFont(size=22, weight="bold"),
             text_color=TEXT,
@@ -272,6 +277,8 @@ class App(ctk.CTk):
         # 更新入口: 版本号 + 状态 + 检查更新按钮(更新源固定为本项目仓库)
         self.update_btn = self._button(header, "检查更新", self._check_updates, width=96)
         self.update_btn.pack(side="right")
+        self.lang_btn = self._button(header, i18n.toggle_label(), self._toggle_language, width=84)
+        self.lang_btn.pack(side="right", padx=(0, 8))
         self.update_status_lbl = ctk.CTkLabel(
             header, text="", anchor="e", text_color=MUTED,
             font=ctk.CTkFont(size=12),
@@ -343,10 +350,10 @@ class App(ctk.CTk):
         row = ctk.CTkFrame(input_frame, fg_color="transparent")
         row.pack(fill="x", padx=10, pady=(0, 10))
         ctk.CTkLabel(row, text="输出格式:").pack(side="left")
-        self.fmt_var = ctk.StringVar(value=FORMAT_LABELS[downloader.FormatKind.FLAC])
+        self.fmt_var = ctk.StringVar(value=i18n.tr(FORMAT_LABELS[downloader.FormatKind.FLAC]))
         self.fmt_menu = ctk.CTkOptionMenu(
             row,
-            values=[FORMAT_LABELS[f] for f in FORMAT_ORDER],
+            values=[i18n.tr(FORMAT_LABELS[f]) for f in FORMAT_ORDER],
             variable=self.fmt_var,
             width=190,
             command=self._on_fmt_change,
@@ -646,7 +653,7 @@ class App(ctk.CTk):
         row2 = ctk.CTkFrame(am_frame, fg_color="transparent")
         row2.pack(fill="x", padx=10, pady=4)
         ctk.CTkLabel(row2, text="音质:").pack(side="left")
-        am_codec_labels = list(premium.GAMDL_CODECS)
+        am_codec_labels = [i18n.tr(label) for label in premium.GAMDL_CODECS]
         self.am_codec_var = ctk.StringVar(value=premium.GAMDL_CODECS[am_codec_labels[0]])
         self.am_codec_label_var = ctk.StringVar(value=am_codec_labels[0])
         ctk.CTkOptionMenu(
@@ -709,7 +716,7 @@ class App(ctk.CTk):
             fg_color="#0f0f10", border_color=BORDER, text_color=TEXT,
         ).pack(side="left", padx=6)
         ctk.CTkLabel(row3, text="音质:").pack(side="left", padx=(16, 0))
-        bp_quality_labels = list(premium.BEATPORT_QUALITIES)
+        bp_quality_labels = [i18n.tr(label) for label in premium.BEATPORT_QUALITIES]
         self.bp_quality_var = ctk.StringVar(value=premium.BEATPORT_QUALITIES[bp_quality_labels[0]][0])
         self.bp_quality_label_var = ctk.StringVar(value=bp_quality_labels[0])
         ctk.CTkOptionMenu(
@@ -774,10 +781,14 @@ class App(ctk.CTk):
         self.ui_queue.put(("premium_status", service, text))
 
     def _on_am_codec_change(self, label: str):
-        self.am_codec_var.set(premium.GAMDL_CODECS[label])
+        codec = premium.GAMDL_CODECS.get(i18n.untr(label))
+        if codec:
+            self.am_codec_var.set(codec)
 
     def _on_bp_quality_change(self, label: str):
-        self.bp_quality_var.set(premium.BEATPORT_QUALITIES[label][0])
+        entry = premium.BEATPORT_QUALITIES.get(i18n.untr(label))
+        if entry:
+            self.bp_quality_var.set(entry[0])
 
     def _start_am_download(self):
         url = self.am_url_entry.get().strip()
@@ -1093,6 +1104,18 @@ class App(ctk.CTk):
             self.ui_queue.put(("cv_total", (i + 1) / total))
             self._end_job("convert")
 
+    # ---------- 界面语言 ----------
+    def _toggle_language(self):
+        language = i18n.toggle_language()
+        if language == i18n.EN:
+            messagebox.showinfo(
+                "Language changed",
+                "The interface will switch to English after restarting the app.",
+            )
+        else:
+            messagebox.showinfo("语言已切换", "重启应用后界面将切换为中文。")
+        self.lang_btn.configure(text=i18n.toggle_label())
+
     # ---------- 更新检查 ----------
     def _set_update_ui(self, *, busy: bool, status: str = ""):
         self.update_btn.configure(state="disabled" if busy else "normal")
@@ -1248,6 +1271,7 @@ class App(ctk.CTk):
             self.after(100, self._drain_ui_queue)
 
     def _log(self, text: str):
+        text = i18n.tr(text)
         self.log_box.configure(state="normal")
         self.log_box.insert("end", text + "\n")
         self.log_box.see("end")

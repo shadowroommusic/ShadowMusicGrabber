@@ -99,7 +99,7 @@ class WebFallbackTests(unittest.TestCase):
             info = updater.check_for_update("1.5.0")
         self.assertIsNotNone(info)
         self.assertEqual(info.tag, "v9.9.9")
-        self.assertEqual(info.asset_name, "MusicGrabber.exe")
+        self.assertEqual(info.asset_name, updater.ASSET_NAME)
         self.assertEqual(info.asset_url, updater.LATEST_ASSET_URL)
 
     def test_web_fallback_reports_no_update_when_tag_is_current(self):
