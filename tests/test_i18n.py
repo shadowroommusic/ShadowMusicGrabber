@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""界面翻译：对照表完整性、回读与语言切换测试。"""
+"""界面翻译：对照表完整性、回读、语言切换，以及英文模式下的界面构建测试。"""
 
 import ast
 import pathlib
@@ -98,6 +98,56 @@ class TableCoverageTests(unittest.TestCase):
         for key, value in i18n._EN.items():
             self.assertTrue(key.strip(), "存在空的中文键")
             self.assertTrue(value.strip(), f"{key!r} 的译文为空")
+
+
+class BilingualStartupTests(unittest.TestCase):
+    """英文模式下界面必须能正常构建（下拉框取值曾误用翻译后的标签而崩溃）。"""
+
+    def setUp(self):
+        self._original = i18n.current_language()
+
+    def tearDown(self):
+        i18n.set_language(self._original)
+
+    @staticmethod
+    def _tk_available() -> bool:
+        try:
+            import tkinter
+
+            root = tkinter.Tk()
+            root.destroy()
+            return True
+        except Exception:  # noqa: BLE001 - 无显示环境时跳过
+            return False
+
+    def _build_app(self):
+        if not self._tk_available():
+            self.skipTest("当前环境没有可用的 Tk 显示")
+        import main
+
+        i18n.set_language(i18n.EN)
+        app = main.App()
+        app.withdraw()
+        return app, main
+
+    def test_app_builds_in_english_mode(self):
+        app, main = self._build_app()
+        try:
+            expected_format = i18n.tr(main.FORMAT_LABELS[main.downloader.FormatKind.FLAC])
+            self.assertEqual(app.fmt_var.get(), expected_format)
+            self.assertEqual(app.lang_btn.cget("text"), "中文")
+            self.assertTrue(app.am_codec_var.get())
+            self.assertTrue(app.bp_quality_var.get())
+        finally:
+            app.destroy()
+
+    def test_selected_format_round_trips_through_translation(self):
+        app, main = self._build_app()
+        try:
+            app.fmt_var.set(i18n.tr(main.FORMAT_LABELS[main.downloader.FormatKind.MP3]))
+            self.assertEqual(app._selected_download_format(), main.downloader.FormatKind.MP3)
+        finally:
+            app.destroy()
 
 
 if __name__ == "__main__":

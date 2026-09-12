@@ -654,7 +654,10 @@ class App(ctk.CTk):
         row2.pack(fill="x", padx=10, pady=4)
         ctk.CTkLabel(row2, text="音质:").pack(side="left")
         am_codec_labels = [i18n.tr(label) for label in premium.GAMDL_CODECS]
-        self.am_codec_var = ctk.StringVar(value=premium.GAMDL_CODECS[am_codec_labels[0]])
+        # 取值要用原文标签：显示名已被翻译成当前语言。
+        self.am_codec_var = ctk.StringVar(
+            value=premium.GAMDL_CODECS[next(iter(premium.GAMDL_CODECS))]
+        )
         self.am_codec_label_var = ctk.StringVar(value=am_codec_labels[0])
         ctk.CTkOptionMenu(
             row2, width=320,
@@ -717,7 +720,9 @@ class App(ctk.CTk):
         ).pack(side="left", padx=6)
         ctk.CTkLabel(row3, text="音质:").pack(side="left", padx=(16, 0))
         bp_quality_labels = [i18n.tr(label) for label in premium.BEATPORT_QUALITIES]
-        self.bp_quality_var = ctk.StringVar(value=premium.BEATPORT_QUALITIES[bp_quality_labels[0]][0])
+        self.bp_quality_var = ctk.StringVar(
+            value=premium.BEATPORT_QUALITIES[next(iter(premium.BEATPORT_QUALITIES))][0]
+        )
         self.bp_quality_label_var = ctk.StringVar(value=bp_quality_labels[0])
         ctk.CTkOptionMenu(
             row3, width=220,
