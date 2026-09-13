@@ -248,17 +248,68 @@ def download_update(
     return target
 
 
+_APPLY_VBS = r'''Option Explicit
+' Shadow MusicGrabber updater: wait for the app to exit, overwrite it, relaunch.
+' Runs under wscript.exe (GUI subsystem) so no console window can appear.
+Dim fso, shell, wmi, pid, target, source, i, ok, col
+Set fso = CreateObject("Scripting.FileSystemObject")
+Set shell = CreateObject("WScript.Shell")
+Set wmi = GetObject("winmgmts:\\.\root\cimv2")
+pid = {pid}
+target = "{target}"
+source = "{source}"
+
+' 1) Wait for the old process to exit (max 60s, then continue to avoid hanging)
+i = 0
+Do While i < 120
+    Set col = wmi.ExecQuery("SELECT ProcessId FROM Win32_Process WHERE ProcessId = " & pid)
+    If col.Count = 0 Then Exit Do
+    WScript.Sleep 500
+    i = i + 1
+Loop
+
+' 2) Overwrite the target (up to 30 retries, 1 second apart)
+ok = False
+i = 0
+Do While (Not ok) And (i < 30)
+    On Error Resume Next
+    Err.Clear
+    fso.CopyFile source, target, True
+    If Err.Number = 0 Then ok = True
+    On Error GoTo 0
+    If Not ok Then WScript.Sleep 1000
+    i = i + 1
+Loop
+
+' 3) Remove the downloaded copy (target is replaced by now)
+On Error Resume Next
+fso.DeleteFile source, True
+On Error GoTo 0
+
+' 4) Launch the new version
+If ok Then shell.Run """" & target & """", 1, False
+
+' 5) Delete this script
+On Error Resume Next
+fso.DeleteFile WScript.ScriptFullName, True
+On Error GoTo 0
+'''
+
+
 _APPLY_SCRIPT = r"""@echo off
 chcp 65001 >nul
 setlocal
 set "TARGET={target}"
 set "SOURCE={source}"
+set /a WAIT=0
 :wait
 tasklist /FI "PID eq {pid}" 2>nul | find "{pid}" >nul
-if not errorlevel 1 (
-  ping -n 2 127.0.0.1 >nul
-  goto wait
-)
+if errorlevel 1 goto ready
+set /a WAIT+=1
+if %WAIT% GEQ 120 goto ready
+ping -n 2 127.0.0.1 >nul
+goto wait
+:ready
 for /L %%i in (1,1,30) do (
   copy /Y "%SOURCE%" "%TARGET%" >nul 2>nul && goto done
   ping -n 2 127.0.0.1 >nul
@@ -273,8 +324,13 @@ del "%~f0" >nul 2>nul
 
 
 def build_apply_script(target_exe: str, source_exe: str, pid: int) -> str:
-    """生成「等待退出 → 替换文件 → 重新启动」的批处理脚本内容。"""
+    """生成「等待退出 → 替换文件 → 重新启动」的批处理脚本内容（兜底方案）。"""
     return _APPLY_SCRIPT.format(target=target_exe, source=source_exe, pid=pid)
+
+
+def build_apply_vbs(target_exe: str, source_exe: str, pid: int) -> str:
+    """生成 VBScript 版替换脚本（主方案：不会出现任何控制台窗口）。"""
+    return _APPLY_VBS.format(target=target_exe, source=source_exe, pid=pid)
 
 
 def install_and_restart(downloaded: str, target_exe: str | None = None) -> str:
@@ -283,12 +339,30 @@ def install_and_restart(downloaded: str, target_exe: str | None = None) -> str:
         raise UpdateError("当前以源码方式运行，不能自动替换程序文件。")
     target = target_exe or sys.executable
     script_dir = os.path.dirname(os.path.abspath(downloaded))
+    source = os.path.abspath(downloaded)
+    pid = os.getpid()
+
+    # CREATE_NO_WINDOW 给子进程一个隐藏控制台; 不要加 DETACHED_PROCESS,
+    # 否则子进程完全没有控制台, 它再启动控制台程序时会被分配一个可见窗口。
+    flags = 0
+    for name in ("CREATE_NEW_PROCESS_GROUP", "CREATE_NO_WINDOW"):
+        flags |= getattr(subprocess, name, 0)
+
+    # 主方案: wscript.exe 是 GUI 子系统程序, 从根本上不可能弹出控制台窗口。
+    vbs = os.path.join(script_dir, "apply_update.vbs")
+    try:
+        # UTF-16 让含中文或特殊字符的路径也能被 WSH 正确读取。
+        with open(vbs, "w", encoding="utf-16") as handle:
+            handle.write(build_apply_vbs(target, source, pid))
+        subprocess.Popen(["wscript.exe", vbs], creationflags=flags, close_fds=True)
+        return vbs
+    except OSError:
+        pass
+
+    # 兜底: 极少数环境禁用了 Windows Script Host 时退回批处理。
     script = os.path.join(script_dir, "apply_update.cmd")
     with open(script, "w", encoding="utf-8") as handle:
-        handle.write(build_apply_script(target, os.path.abspath(downloaded), os.getpid()))
-    flags = 0
-    for name in ("DETACHED_PROCESS", "CREATE_NEW_PROCESS_GROUP", "CREATE_NO_WINDOW"):
-        flags |= getattr(subprocess, name, 0)
+        handle.write(build_apply_script(target, source, pid))
     subprocess.Popen(["cmd.exe", "/c", script], creationflags=flags, close_fds=True)
     return script
 

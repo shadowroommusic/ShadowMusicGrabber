@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """更新模块的版本解析、Release 解析、限流兜底与替换脚本测试。"""
 
+import os
 import unittest
 import urllib.error
 from unittest import mock
@@ -183,6 +184,47 @@ class ApplyScriptTests(unittest.TestCase):
         self.assertIn(r'copy /Y "%SOURCE%" "%TARGET%"', script)
         self.assertIn(r'start "" "%TARGET%"', script)
         self.assertIn(r"TARGET=C:\app\MusicGrabber.exe", script)
+
+    def test_apply_script_has_wait_timeout(self):
+        """等待不能无限循环, 否则更新会卡死。"""
+        script = updater.build_apply_script(r"C:\app\a.exe", r"C:\tmp\b.exe", 1)
+        self.assertIn("set /a WAIT=0", script)
+        self.assertIn("GEQ 120", script)
+
+    def test_apply_vbs_waits_replaces_and_cleans_up(self):
+        """VBS 主方案: WMI 等待 + 超时 + 覆盖 + 清理(且不依赖 cmd)。"""
+        vbs = updater.build_apply_vbs(r"C:\app\a.exe", r"C:\tmp\b.exe", 4242)
+        self.assertIn("pid = 4242", vbs)
+        self.assertIn(r'target = "C:\app\a.exe"', vbs)
+        self.assertIn(r'source = "C:\tmp\b.exe"', vbs)
+        self.assertIn("Win32_Process", vbs)
+        self.assertIn("i < 120", vbs)
+        self.assertIn("fso.CopyFile source, target, True", vbs)
+        self.assertIn("WScript.ScriptFullName", vbs)
+        self.assertNotIn("cmd.exe", vbs)
+
+    def test_install_and_restart_prefers_vbs(self):
+        """install_and_restart 应优先用 wscript, 且不再使用 DETACHED_PROCESS。"""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            downloaded = os.path.join(td, "ShadowMusicGrabber-1.9.0-windows-x64.exe")
+            open(downloaded, "wb").write(b"new")
+            calls = []
+
+            def fake_popen(args, **kwargs):
+                calls.append((args, kwargs))
+                return mock.Mock()
+
+            with mock.patch.object(updater, "can_self_update", return_value=True), \
+                 mock.patch.object(updater.subprocess, "Popen", side_effect=fake_popen):
+                script = updater.install_and_restart(downloaded, target_exe=r"C:\app\a.exe")
+
+        self.assertTrue(script.endswith(".vbs"), script)
+        self.assertEqual(calls[0][0][0], "wscript.exe")
+        flags = calls[0][1].get("creationflags", 0)
+        self.assertFalse(flags & getattr(updater.subprocess, "DETACHED_PROCESS", 0))
+        self.assertTrue(flags & getattr(updater.subprocess, "CREATE_NO_WINDOW", 0))
 
 
 if __name__ == "__main__":
