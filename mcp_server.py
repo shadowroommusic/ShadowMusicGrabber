@@ -33,7 +33,7 @@ import ncm_decrypt  # noqa: E402
 import qmc_decrypt  # noqa: E402
 
 SERVER_NAME = "shadow-musicgrabber"
-SERVER_VERSION = "1.9.0"  # keep in sync with pyproject.toml / main.py APP_VERSION
+SERVER_VERSION = "1.9.1"  # keep in sync with pyproject.toml / main.py APP_VERSION
 PROTOCOL_VERSION = "2024-11-05"
 
 _ENCRYPTED_EXTS = {".ncm"} | set(qmc_decrypt.QMC_EXTS)

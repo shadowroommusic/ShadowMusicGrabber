@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "shadow-musicgrabber"
-version = "1.9.0"
+version = "1.9.1"
 description = "Shadow MusicGrabber MCP server: audio probe, NCM / QQ Music decrypt, transcode, download"
 readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.9"

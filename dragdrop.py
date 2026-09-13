@@ -71,15 +71,48 @@ def expand_paths(paths: Iterable[str], exts: Optional[Iterable[str]] = None) -> 
     return found
 
 
+_CTK_INNER_ATTRS = ("_parent_canvas", "_parent_frame", "_scrollbar", "_label")
+
+
+def _drop_targets(widget, _max_depth: int = 6) -> list:
+    """收集需要注册为拖放目标的窗口。
+
+    Tk 的拖放按「鼠标命中的窗口」生效且不向父级冒泡，而 CTkScrollableFrame
+    的结构是倒置的：它自己被画在 canvas 上，canvas 又放在外层 frame 里。
+    只注册 widget 本身时，空队列（内容区极小）和任务行都会命中未注册的
+    窗口，拖放被系统直接忽略。
+    """
+    seen: set[int] = set()
+    targets: list = []
+
+    def visit(node, depth: int):
+        if node is None or depth > _max_depth or id(node) in seen:
+            return
+        seen.add(id(node))
+        targets.append(node)
+        for attr in _CTK_INNER_ATTRS:
+            visit(getattr(node, attr, None), depth + 1)
+        try:
+            children = node.winfo_children()
+        except Exception:  # noqa: BLE001 - 非 Tk 对象/已销毁控件
+            children = []
+        for child in children:
+            visit(child, depth + 1)
+
+    visit(widget, 0)
+    return targets
+
+
 def enable_drop(
     widget,
     on_paths: Callable[[list[str]], None],
     *,
     exts: Optional[Iterable[str]] = None,
 ) -> bool:
-    """把 widget 注册为文件拖放目标；成功返回 True。
+    """把 widget（及其所有子控件）注册为文件拖放目标；成功返回 True。
 
     on_paths 收到的是过滤（并展开目录）后的绝对路径列表。
+    重复调用是安全的：入队回调是替换式的，不会重复添加。
     """
     try:
         from tkinterdnd2 import TkinterDnD
@@ -90,21 +123,29 @@ def enable_drop(
         root = widget.winfo_toplevel()
         # 给 root 装载 tkdnd 扩展；同一 root 重复调用是安全的。
         TkinterDnD._require(root)
-
-        def handler(event):
-            paths = expand_paths(parse_drop_paths(widget, getattr(event, "data", "")), exts)
-            on_paths(paths)
-            return getattr(event, "action", None)
-
-        widget.drop_target_register(_DND_FILES)
-        widget.dnd_bind("<<Drop>>", handler)
-        # 拖入时高亮，离开/放下后恢复，给一点反馈。
-        widget.dnd_bind("<<DropEnter>>", lambda event: _set_hover(widget, True))
-        widget.dnd_bind("<<DropLeave>>", lambda event: _set_hover(widget, False))
-        widget.dnd_bind("<<Drop>>", lambda event: _set_hover(widget, False), add=True)
-        return True
-    except Exception:  # noqa: BLE001 - 平台/主题差异导致注册失败时不影响主流程
+    except Exception:  # noqa: BLE001 - 平台差异导致装载失败
         return False
+
+    def handler(event):
+        paths = expand_paths(parse_drop_paths(widget, getattr(event, "data", "")), exts)
+        on_paths(paths)
+        return getattr(event, "action", None)
+
+    registered = 0
+    for target in _drop_targets(widget):
+        try:
+            target.drop_target_register(_DND_FILES)
+            target.dnd_bind("<<Drop>>", handler)
+            # 拖入时高亮，离开/放下后恢复，给一点反馈。
+            target.dnd_bind("<<DropEnter>>", lambda event, w=widget: _set_hover(w, True))
+            target.dnd_bind("<<DropLeave>>", lambda event, w=widget: _set_hover(w, False))
+            target.dnd_bind(
+                "<<Drop>>", lambda event, w=widget: _set_hover(w, False), add=True
+            )
+            registered += 1
+        except Exception:  # noqa: BLE001 - 个别控件不支持拖放时跳过
+            continue
+    return registered > 0
 
 
 def _set_hover(widget, hovering: bool) -> None:

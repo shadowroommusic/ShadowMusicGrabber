@@ -28,7 +28,7 @@ import qmc_decrypt
 import updater
 
 APP_NAME = "Shadow MusicGrabber"
-APP_VERSION = "1.9.0"
+APP_VERSION = "1.9.1"
 
 # 界面语言：先读已保存的设置，否则按系统语言；控件在构造时由 i18n 统一翻译。
 i18n.install()
@@ -634,6 +634,13 @@ class App(ctk.CTk):
             added += 1
         if added:
             self._log(f"已添加 {added} 个加密文件")
+            if getattr(self, "ncm_drop_enabled", False):
+                # 新加入的任务行会挡住拖放(Tk 拖放不向父级冒泡), 重新扫描注册一次。
+                dragdrop.enable_drop(
+                    self.ncm_container,
+                    self._on_decrypt_drop,
+                    exts={".ncm"} | set(qmc_decrypt.QMC_EXTS),
+                )
         return added
 
     def _clear_ncm_list(self):
