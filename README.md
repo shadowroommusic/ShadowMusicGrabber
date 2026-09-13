@@ -40,7 +40,7 @@ A Windows desktop toolbox with four independent modules: public link downloading
 
 | 系统 | 文件 |
 | --- | --- |
-| Windows 64 位 | `ShadowMusicGrabber-1.8.2-windows-x64.exe` |
+| Windows 64 位 | `ShadowMusicGrabber-<版本>-windows-x64.exe` |
 
 下载后直接运行，无需安装 Python。建议把 FFmpeg 放到 EXE 同目录（或在系统 PATH 中），否则下载/转码功能不可用。
 

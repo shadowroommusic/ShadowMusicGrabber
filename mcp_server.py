@@ -33,7 +33,7 @@ import ncm_decrypt  # noqa: E402
 import qmc_decrypt  # noqa: E402
 
 SERVER_NAME = "shadow-musicgrabber"
-SERVER_VERSION = "1.8.2"  # keep in sync with pyproject.toml / main.py APP_VERSION
+SERVER_VERSION = "1.9.0"  # keep in sync with pyproject.toml / main.py APP_VERSION
 PROTOCOL_VERSION = "2024-11-05"
 
 _ENCRYPTED_EXTS = {".ncm"} | set(qmc_decrypt.QMC_EXTS)
@@ -244,10 +244,19 @@ def tool_decrypt_many(args: dict) -> dict:
     items = []
     for src in sources:
         target_dir = out_dir or os.path.dirname(src)
-        try:
-            items.append(_decrypt_one(src, target_dir, fmt, reserved))
-        except Exception as exc:
-            items.append({"source": src, "error": f"{type(exc).__name__}: {exc}"})
+        # 偶发失败(例如首次调用 ffmpeg 的瞬时问题)自动重试一次, 仍失败才记为错误。
+        last_error: Optional[Exception] = None
+        for _attempt in range(2):
+            try:
+                items.append(_decrypt_one(src, target_dir, fmt, reserved))
+                last_error = None
+                break
+            except Exception as exc:
+                last_error = exc
+        if last_error is not None:
+            items.append(
+                {"source": src, "error": f"{type(last_error).__name__}: {last_error}"}
+            )
     failed = [item for item in items if "error" in item]
     return {
         "total": len(items),

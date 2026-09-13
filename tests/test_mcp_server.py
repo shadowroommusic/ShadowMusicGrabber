@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 import unittest
+from unittest import mock
 
 PROJ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SERVER = os.path.join(PROJ, "mcp_server.py")
@@ -128,6 +129,42 @@ class McpProtocolTests(unittest.TestCase):
             {"path": os.path.join(PROJ, "README.md"), "output_format": "original"},
         )
         self.assertIn("output_format", text)
+
+
+class DecryptRetryTests(unittest.TestCase):
+    """批量解密的偶发失败重试(直接测函数, 不依赖真实文件)。"""
+
+    def test_decrypt_many_retries_once_then_succeeds(self):
+        import mcp_server
+
+        calls = []
+
+        def flaky(src, out_dir, fmt, reserved):
+            calls.append(src)
+            if len(calls) == 1:
+                raise RuntimeError("transient ffmpeg failure")
+            return {"source": src, "output": "ok"}
+
+        with mock.patch.object(mcp_server, "_collect_encrypted", return_value=["a.ncm"]), \
+             mock.patch.object(mcp_server, "_decrypt_one", side_effect=flaky):
+            result = mcp_server.tool_decrypt_many({"paths": ["a.ncm"]})
+
+        self.assertEqual(result["succeeded"], 1)
+        self.assertEqual(result["failed"], 0)
+        self.assertEqual(len(calls), 2, "应恰好重试一次")
+
+    def test_decrypt_many_reports_error_after_two_failures(self):
+        import mcp_server
+
+        with mock.patch.object(mcp_server, "_collect_encrypted", return_value=["a.ncm"]), \
+             mock.patch.object(
+                 mcp_server, "_decrypt_one", side_effect=RuntimeError("boom")
+             ) as patched:
+            result = mcp_server.tool_decrypt_many({"paths": ["a.ncm"]})
+
+        self.assertEqual(result["failed"], 1)
+        self.assertEqual(patched.call_count, 2)
+        self.assertIn("boom", result["items"][0]["error"])
 
 
 if __name__ == "__main__":
