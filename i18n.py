@@ -136,6 +136,11 @@ _EN = {
     "网易云音乐 NCM": "NetEase Cloud Music NCM",
     "QQ 音乐 QMC": "QQ Music QMC",
     "请先添加要解密的文件": "Add files to decrypt first",
+    # 解密页：输出格式与拖放
+    "原始格式 (解密得到什么就是什么)": "Original (keep whatever decryption produces)",
+    "· 可直接拖入文件或文件夹": "· drag files or folders straight in",
+    "· 请用“添加加密文件”按钮选择": "· use the “Add encrypted files” button instead",
+    "拖入的内容里没有可解密的文件": "Nothing droppable in there — no .ncm / .qmc / .mflac / .mgg files",
     "当前解密队列中的文件都已完成。若要重新解密,请清空队列后重新添加。":
         "Every file in the decrypt queue is already done. Clear the queue and add them again to re-decrypt.",
     # Premium 页

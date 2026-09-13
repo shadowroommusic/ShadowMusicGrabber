@@ -99,8 +99,13 @@ class WebFallbackTests(unittest.TestCase):
             info = updater.check_for_update("1.5.0")
         self.assertIsNotNone(info)
         self.assertEqual(info.tag, "v9.9.9")
-        self.assertEqual(info.asset_name, updater.ASSET_NAME)
-        self.assertEqual(info.asset_url, updater.LATEST_ASSET_URL)
+        # 兜底路径按当前平台拼出带版本号与平台标识的资产名
+        expected = f"{updater.ASSET_STEM}-9.9.9-{updater.platform_tag()}{updater._platform_exts()[0]}"
+        self.assertEqual(info.asset_name, expected)
+        self.assertEqual(
+            info.asset_url,
+            f"https://github.com/{updater.REPO}/releases/download/v9.9.9/{expected}",
+        )
 
     def test_web_fallback_reports_no_update_when_tag_is_current(self):
         limited = updater.UpdateError("nope")
@@ -118,6 +123,48 @@ class WebFallbackTests(unittest.TestCase):
         ):
             with self.assertRaises(updater.UpdateError):
                 updater.check_for_update("1.5.0")
+
+
+class PlatformAssetTests(unittest.TestCase):
+    """按平台/架构挑选 Release 资产。"""
+
+    def test_platform_tag_shape(self):
+        tag = updater.platform_tag()
+        self.assertRegex(tag, r"^(windows|macos|linux|unknown)-(x64|x86|arm64)$")
+
+    def _with_windows(self):
+        return (
+            mock.patch.object(updater, "platform_tag", return_value="windows-x64"),
+            mock.patch.object(updater, "_platform_exts", return_value=(".exe", ".zip")),
+        )
+
+    def test_prefers_matching_platform_over_legacy(self):
+        assets = [
+            {"name": "ShadowMusicGrabber-1.9.0-macos-arm64.zip", "browser_download_url": "u-mac", "size": 1},
+            {"name": "ShadowMusicGrabber-1.9.0-windows-x64.exe", "browser_download_url": "u-win", "size": 2},
+            {"name": "ShadowMusicGrabber.exe", "browser_download_url": "u-legacy", "size": 3},
+        ]
+        patch_a, patch_b = self._with_windows()
+        with patch_a, patch_b:
+            picked = updater._select_asset(assets, "v1.9.0")
+        self.assertEqual(picked["browser_download_url"], "u-win")
+
+    def test_skips_other_platforms(self):
+        assets = [
+            {"name": "ShadowMusicGrabber-1.9.0-macos-arm64.zip", "browser_download_url": "u-mac", "size": 1},
+        ]
+        patch_a, patch_b = self._with_windows()
+        with patch_a, patch_b:
+            self.assertIsNone(updater._select_asset(assets, "v1.9.0"))
+
+    def test_legacy_name_still_accepted(self):
+        assets = [
+            {"name": "ShadowMusicGrabber.exe", "browser_download_url": "u-legacy", "size": 1},
+        ]
+        patch_a, patch_b = self._with_windows()
+        with patch_a, patch_b:
+            picked = updater._select_asset(assets, "v1.9.0")
+        self.assertEqual(picked["browser_download_url"], "u-legacy")
 
 
 class DownloadTests(unittest.TestCase):

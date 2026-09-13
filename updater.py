@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import platform
 import re
 import subprocess
 import sys
@@ -22,8 +23,10 @@ REPO = "shadowroommusic/ShadowMusicGrabber"
 API_LATEST_RELEASE = f"https://api.github.com/repos/{REPO}/releases/latest"
 RELEASES_PAGE = f"https://github.com/{REPO}/releases"
 LATEST_PAGE = f"https://github.com/{REPO}/releases/latest"
-LATEST_ASSET_URL = f"https://github.com/{REPO}/releases/latest/download/ShadowMusicGrabber.exe"
-ASSET_NAME = "ShadowMusicGrabber.exe"
+# Release 资产命名: ShadowMusicGrabber-<版本>-<平台>-<架构>.<扩展名>
+# 例如 ShadowMusicGrabber-1.8.1-windows-x64.exe / ...-macos-arm64.zip
+ASSET_STEM = "ShadowMusicGrabber"
+LEGACY_ASSET_NAME = "ShadowMusicGrabber.exe"
 USER_AGENT = "MusicGrabber-Updater"
 TIMEOUT = 20
 _CHUNK = 256 * 1024
@@ -75,6 +78,37 @@ def can_self_update() -> bool:
     return bool(getattr(sys, "frozen", False)) and os.name == "nt"
 
 
+def platform_tag() -> str:
+    """当前平台的资产标识,例如 windows-x64 / macos-arm64。"""
+    system = (platform.system() or "").lower()
+    machine = (platform.machine() or "").lower()
+    if system == "windows":
+        os_name = "windows"
+    elif system == "darwin":
+        os_name = "macos"
+    elif system == "linux":
+        os_name = "linux"
+    else:
+        os_name = system or "unknown"
+    if machine in ("arm64", "aarch64"):
+        arch = "arm64"
+    elif machine in ("x86", "i386", "i686"):
+        arch = "x86"
+    else:
+        arch = "x64"
+    return f"{os_name}-{arch}"
+
+
+def _platform_exts() -> tuple[str, ...]:
+    """当前平台偏好的资产扩展名(按优先级)。"""
+    system = (platform.system() or "").lower()
+    if system == "windows":
+        return (".exe", ".zip")
+    if system == "darwin":
+        return (".dmg", ".zip")
+    return (".zip", ".tar.gz")
+
+
 def _http_error_message(code: int) -> str:
     if code == 404:
         return "更新仓库还没有发布任何 Release。"
@@ -98,23 +132,33 @@ def _get_json(url: str) -> dict:
         raise UpdateError("更新服务返回了无法解析的数据。") from exc
 
 
-def _select_asset(assets: list) -> dict | None:
-    """优先选取 exe，其次 zip。"""
+def _select_asset(assets: list, tag: str = "") -> dict | None:
+    """挑选当前平台的资产。
+
+    新命名(带平台/架构)精确匹配优先;旧命名(如 ShadowMusicGrabber.exe)
+    作为兜底,保证仍能升级旧 Release;明确属于其它平台的资产直接跳过。
+    """
+    platform_id = platform_tag()
+    exts = _platform_exts()
+    ext_rank = {ext: index for index, ext in enumerate(exts)}
     ranked = []
     for asset in assets or []:
         name = str(asset.get("name", ""))
         lower = name.lower()
-        if lower.endswith(".exe"):
-            rank = 0
-        elif lower.endswith(".zip"):
-            rank = 1
-        else:
+        ext = next((candidate for candidate in exts if lower.endswith(candidate)), None)
+        if ext is None:
             continue
-        ranked.append((rank, lower, asset))
+        if platform_id in lower:
+            platform_rank = 0
+        elif any(word in lower for word in ("windows", "macos", "linux", "darwin")):
+            continue
+        else:
+            platform_rank = 1
+        ranked.append((platform_rank, ext_rank[ext], lower, asset))
     if not ranked:
         return None
-    ranked.sort(key=lambda item: (item[0], item[1]))
-    return ranked[0][2]
+    ranked.sort(key=lambda item: (item[0], item[1], item[2]))
+    return ranked[0][3]
 
 
 def _check_via_api(current_version: str) -> UpdateInfo | None:
@@ -122,7 +166,7 @@ def _check_via_api(current_version: str) -> UpdateInfo | None:
     tag = str(data.get("tag_name") or data.get("name") or "").strip()
     if not tag or not is_newer(tag, current_version):
         return None
-    asset = _select_asset(data.get("assets") or [])
+    asset = _select_asset(data.get("assets") or [], tag)
     return UpdateInfo(
         tag=tag,
         name=str(data.get("name") or "").strip(),
@@ -166,7 +210,10 @@ def check_for_update(current_version: str) -> UpdateInfo | None:
         raise
     if not tag or not is_newer(tag, current_version):
         return None
-    return UpdateInfo(tag=tag, asset_name=ASSET_NAME, asset_url=LATEST_ASSET_URL)
+    version = tag.lstrip("vV") or tag
+    name = f"{ASSET_STEM}-{version}-{platform_tag()}{_platform_exts()[0]}"
+    url = f"https://github.com/{REPO}/releases/download/{tag}/{name}"
+    return UpdateInfo(tag=tag, asset_name=name, asset_url=url)
 
 
 def download_update(
@@ -177,7 +224,7 @@ def download_update(
         raise UpdateError("这个 Release 没有可下载的 exe/zip 资产。")
     target_dir = dest_dir or os.path.join(tempfile.gettempdir(), "MusicGrabber-update")
     os.makedirs(target_dir, exist_ok=True)
-    filename = info.asset_name or os.path.basename(info.asset_url) or ASSET_NAME
+    filename = info.asset_name or os.path.basename(info.asset_url) or LEGACY_ASSET_NAME
     target = os.path.join(target_dir, filename)
     request = urllib.request.Request(info.asset_url, headers={"User-Agent": USER_AGENT})
     try:

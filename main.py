@@ -20,6 +20,7 @@ import customtkinter as ctk
 
 import converter
 import downloader
+import dragdrop
 import i18n
 import ncm_decrypt
 import premium
@@ -27,7 +28,7 @@ import qmc_decrypt
 import updater
 
 APP_NAME = "Shadow MusicGrabber"
-APP_VERSION = "1.8.0"
+APP_VERSION = "1.8.1"
 
 # 界面语言：先读已保存的设置，否则按系统语言；控件在构造时由 i18n 统一翻译。
 i18n.install()
@@ -61,6 +62,15 @@ FORMAT_ORDER = [
     downloader.FormatKind.MP3,
     downloader.FormatKind.ORIGINAL,
 ]
+
+# 解密页的输出格式：值用于扩展名/转码，显示名交给 i18n 翻译。
+DECRYPT_FORMAT_LABELS = {
+    "原始格式 (解密得到什么就是什么)": "original",
+    "FLAC (无损)": "flac",
+    "WAV (无损)": "wav",
+    "MP3 (320kbps)": "mp3",
+}
+DECRYPT_TARGET_FORMATS = {"original", "flac", "wav", "mp3"}
 
 
 def resource_path(*parts: str) -> str:
@@ -495,6 +505,23 @@ class App(ctk.CTk):
             fg_color="#0f0f10", border_color=BORDER, text_color=TEXT,
         ).pack(side="left", fill="x", expand=True, padx=6)
         self._button(row, "浏览…", self._pick_ncm_out, width=78).pack(side="left")
+
+        fmt_row = ctk.CTkFrame(parent, fg_color="transparent")
+        fmt_row.pack(fill="x", padx=10, pady=(0, 4))
+        ctk.CTkLabel(fmt_row, text="输出格式:").pack(side="left")
+        decrypt_labels = [i18n.tr(label) for label in DECRYPT_FORMAT_LABELS]
+        # 下拉框显示译文，取值必须用原文标签映射。
+        self.decrypt_fmt_var = ctk.StringVar(value="original")
+        self.decrypt_fmt_label_var = ctk.StringVar(value=decrypt_labels[0])
+        ctk.CTkOptionMenu(
+            fmt_row, width=300,
+            values=decrypt_labels,
+            variable=self.decrypt_fmt_label_var,
+            command=self._on_decrypt_fmt_change,
+            fg_color=BUTTON, button_color=BUTTON,
+            button_hover_color=BUTTON_HOVER, dropdown_fg_color=PANEL_ALT,
+            dropdown_hover_color=BUTTON_HOVER, text_color=TEXT,
+        ).pack(side="left", padx=6)
         self._button(
             row,
             "打开目录",
@@ -513,9 +540,27 @@ class App(ctk.CTk):
             border_width=1, border_color=BORDER,
         )
         list_frame.pack(fill="both", expand=True, padx=10, pady=6)
-        ctk.CTkLabel(list_frame, text="解密队列", anchor="w").pack(fill="x", padx=8, pady=(6, 0))
+        queue_head = ctk.CTkFrame(list_frame, fg_color="transparent")
+        queue_head.pack(fill="x", padx=8, pady=(6, 0))
+        ctk.CTkLabel(queue_head, text="解密队列", anchor="w").pack(side="left")
+        self.ncm_drop_hint = ctk.CTkLabel(
+            queue_head, text="· 可直接拖入文件或文件夹", anchor="w",
+            text_color=MUTED, font=ctk.CTkFont(size=12),
+        )
+        self.ncm_drop_hint.pack(side="left", padx=(8, 0))
         self.ncm_container = ctk.CTkScrollableFrame(list_frame, fg_color="#0f0f10")
         self.ncm_container.pack(fill="both", expand=True, padx=6, pady=6)
+
+        # 拖入即入队；拖放库不可用时自动降级为“仅按钮添加”。
+        if dragdrop.enable_drop(
+            self.ncm_container,
+            self._on_decrypt_drop,
+            exts={".ncm"} | set(qmc_decrypt.QMC_EXTS),
+        ):
+            self.ncm_drop_enabled = True
+        else:
+            self.ncm_drop_enabled = False
+            self.ncm_drop_hint.configure(text="· 请用“添加加密文件”按钮选择")
 
         # 解密队列混合 NcmTask 与 QmcTask(两者接口一致)
         self.ncm_tasks: list = []
@@ -546,26 +591,50 @@ class App(ctk.CTk):
                 ("所有文件", "*.*"),
             ],
         )
+        self._enqueue_decrypt_files(files)
+
+    def _on_decrypt_drop(self, paths: list):
+        """拖放回调:paths 已按扩展名过滤并展开过目录(可能为空)。"""
+        if not paths:
+            self._log("拖入的内容里没有可解密的文件")
+            return
+        if not self._require_idle("ncm", "解密队列"):
+            return
+        self._enqueue_decrypt_files(paths)
+
+    def _on_decrypt_fmt_change(self, label: str):
+        self.decrypt_fmt_var.set(DECRYPT_FORMAT_LABELS.get(i18n.untr(label), "original"))
+
+    def _decrypt_output_path(self, task, out_dir: str) -> str:
+        """本轮解密该任务的目标路径(扩展名由加密格式推定)。"""
+        if isinstance(task, ncm_decrypt.NcmTask):
+            return ncm_decrypt.make_output_path(task.src, out_dir)
+        return qmc_decrypt.make_output_path(task.src, out_dir)
+
+    def _enqueue_decrypt_files(self, paths) -> int:
+        """把一批路径加入解密队列(按钮选择与拖放共用),返回新增数量。"""
         added = 0
-        for f in files:
+        for raw in paths:
+            f = os.path.abspath(os.fspath(raw))
             ext = os.path.splitext(f)[1].lower()
             if ext == ".ncm":
-                dst = ncm_decrypt.make_output_path(f, self.ncm_out_var.get())
-                task = ncm_decrypt.NcmTask(src=f, dst=dst)
+                task = ncm_decrypt.NcmTask(src=f, dst="")
             elif ext in qmc_decrypt.QMC_EXTS:
-                dst = qmc_decrypt.make_output_path(f, self.ncm_out_var.get())
-                task = qmc_decrypt.QmcTask(src=f, dst=dst)
+                task = qmc_decrypt.QmcTask(src=f, dst="")
             else:
                 messagebox.showwarning("提示", f"不支持该文件类型: {f}")
                 continue
             if any(t.src == f for t in self.ncm_tasks):
                 continue
+            task.dst = self._decrypt_output_path(task, self.ncm_out_var.get())
             self.ncm_tasks.append(task)
             row = TaskRow(self.ncm_container, task)
             row.title_lbl.configure(text=os.path.basename(f), width=400)
             self.ncm_rows.append(row)
             added += 1
-        self._log(f"已添加 {added} 个加密文件")
+        if added:
+            self._log(f"已添加 {added} 个加密文件")
+        return added
 
     def _clear_ncm_list(self):
         if not self._require_idle("ncm", "解密队列"):
@@ -583,6 +652,12 @@ class App(ctk.CTk):
         pending = [task for task in self.ncm_tasks if task.status != "完成"]
         if not pending:
             messagebox.showinfo("没有待处理任务", "当前解密队列中的文件都已完成。若要重新解密,请清空队列后重新添加。")
+            return
+        target_fmt = self.decrypt_fmt_var.get() or "original"
+        if target_fmt not in DECRYPT_TARGET_FORMATS:
+            target_fmt = "original"
+        if target_fmt != "original" and not self.ffmpeg:
+            messagebox.showerror("错误", "未找到 ffmpeg,无法转码。请先安装 ffmpeg 并加入 PATH。")
             return
         if not self._begin_job("ncm", len(pending)):
             return
@@ -602,13 +677,43 @@ class App(ctk.CTk):
                     task.dst = ncm_decrypt.make_output_path(task.src, out_dir, reserved)
                 else:
                     task.dst = qmc_decrypt.make_output_path(task.src, out_dir, reserved)
-            threading.Thread(target=self._ncm_worker, args=(pending,), daemon=True).start()
+            threading.Thread(target=self._ncm_worker, args=(pending, target_fmt), daemon=True).start()
         except Exception:
             self._running_jobs.discard("ncm")
             self._job_remaining.pop("ncm", None)
             raise
 
-    def _ncm_worker(self, tasks: list):
+    def _transcode_decrypted(self, raw: str, fmt: str, on_progress) -> str:
+        """把解密结果转成目标格式；已经是指定格式时原样返回。
+
+        中间文件只在转码成功后才删除，所以即使转码失败，
+        用户仍能在输出目录拿到解密结果。
+        """
+        current = os.path.splitext(raw)[1].lstrip(".").lower()
+        if current == fmt:
+            return raw
+        out_dir = os.path.dirname(os.path.abspath(raw)) or "."
+        final = converter.build_output_path(raw, out_dir, fmt)
+        try:
+            converter.convert_file(
+                raw, final, fmt,
+                on_progress=lambda p: on_progress(50.0 + p * 0.5),
+                ffmpeg=self.ffmpeg,
+            )
+        except Exception:
+            if os.path.exists(final):
+                try:
+                    os.remove(final)
+                except OSError:
+                    pass
+            raise
+        try:
+            os.remove(raw)
+        except OSError:
+            pass
+        return final
+
+    def _ncm_worker(self, tasks: list, target_fmt: str = "original"):
         total = len(tasks)
         for i, task in enumerate(tasks):
             task.status = "解密中…"
@@ -620,12 +725,20 @@ class App(ctk.CTk):
                     self.ui_queue.put(("ncm_progress", task))
 
             try:
+                turning = target_fmt != "original"
+                step = (lambda p: on_progress(p * 0.5)) if turning else on_progress
                 if isinstance(task, ncm_decrypt.NcmTask):
-                    dst, meta = ncm_decrypt.decrypt_file(
-                        task.src, task.dst, on_progress=on_progress, ffmpeg=self.ffmpeg)
+                    raw, meta = ncm_decrypt.decrypt_file(
+                        task.src, task.dst, on_progress=step, ffmpeg=self.ffmpeg)
                 else:
-                    dst, meta = qmc_decrypt.decrypt_file(
-                        task.src, task.dst, on_progress=on_progress)
+                    raw, meta = qmc_decrypt.decrypt_file(
+                        task.src, task.dst, on_progress=step)
+                dst = raw
+                if turning:
+                    task.status = "转码中…"
+                    self.ui_queue.put(("ncm_refresh", task))
+                    dst = self._transcode_decrypted(raw, target_fmt, on_progress)
+                    task.dst = dst
                 task.status = "完成"
                 task.set_progress(100.0)
                 self.ui_queue.put(("ncm_refresh", task))

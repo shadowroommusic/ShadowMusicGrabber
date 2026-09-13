@@ -20,6 +20,9 @@ tmp_ret = collect_all('Crypto')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('mutagen')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+# 拖放支持: 只声明模块, tkdnd 的平台库/tcl 由 pyinstaller-hooks-contrib 的
+# 官方 hook 自动按当前平台收集, 避免把其它平台的二进制也塞进来。
+hiddenimports += ['tkinterdnd2', 'tkinterdnd2.TkinterDnD']
 # gamdl imports its Click entry point dynamically in the frozen build.
 hiddenimports += ['gamdl.cli', 'gamdl.cli.cli', 'Crypto.Cipher.AES', 'Crypto.Util.Padding', 'mutagen.flac']
 

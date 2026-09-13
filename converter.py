@@ -24,7 +24,7 @@ SUPPORTED_INPUT_EXT = {".mp3", ".wav", ".flac", ".m4a", ".aac", ".ogg", ".opus",
 class ConvertTask:
     src: str
     dst: str
-    fmt: str  # "flac" | "wav"
+    fmt: str  # "flac" | "wav" | "mp3"
     status: str = "排队中"
     progress: float = 0.0
     error: str = ""
@@ -176,7 +176,7 @@ def convert_file(
     dst = os.path.abspath(os.fspath(dst))
     if not os.path.isfile(src):
         raise ConvertError(f"文件不存在: {src}")
-    if fmt not in ("flac", "wav"):
+    if fmt not in ("flac", "wav", "mp3"):
         raise ConvertError(f"不支持的输出格式: {fmt}")
     if os.path.normcase(src) == os.path.normcase(dst):
         raise ConvertError("输出路径不能与源文件相同,请改用其他文件名或目录")
@@ -190,6 +190,8 @@ def convert_file(
 
     if fmt == "flac":
         codec_args = ["-c:a", "flac", "-compression_level", "8"]
+    elif fmt == "mp3":
+        codec_args = ["-c:a", "libmp3lame", "-b:a", "320k"]
     else:  # wav - 跟随源位深,避免 24/32-bit 源被降为 16-bit
         codec_args = _wav_codec_args(src, ffmpeg_exe)
 

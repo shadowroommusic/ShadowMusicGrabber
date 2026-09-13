@@ -25,9 +25,15 @@ A Windows desktop toolbox with four independent modules: public link downloading
 
 ### 方式一：直接使用打包版本（推荐）
 
-1. 打开 [Releases](https://github.com/shadowroommusic/ShadowMusicGrabber/releases/latest) 下载 `ShadowMusicGrabber.exe`。
-2. 双击运行，无需安装 Python。
-3. 建议把 FFmpeg 放到 EXE 同目录（或在系统 PATH 中），否则下载/转码功能不可用。
+打开 [Releases](https://github.com/shadowroommusic/ShadowMusicGrabber/releases/latest)，下载与你的系统匹配的文件。资产命名格式为 `ShadowMusicGrabber-<版本>-<平台>-<架构>.<扩展名>`：
+
+| 系统 | 文件 |
+| --- | --- |
+| Windows 64 位 | `ShadowMusicGrabber-1.8.1-windows-x64.exe` |
+
+下载后直接运行，无需安装 Python。建议把 FFmpeg 放到 EXE 同目录（或在系统 PATH 中），否则下载/转码功能不可用。
+
+程序内也可以从旧版本升级：打开程序，点右上角 **检查更新**，会自动下载并替换为新版本。
 
 ### 方式二：从源码运行
 
@@ -52,11 +58,10 @@ python main.py
 主界面右上角有 **检查更新 / Check for updates** 按钮，更新源固定指向本仓库的 Releases：
 
 - 发现新版本时询问是否下载；确认后自动下载并替换当前 EXE，然后重启程序。
-- 优先走 GitHub API；**API 被限流（未登录每小时 60 次）或不可用时自动退回网页方式**读取最新版本与资产地址。
+- 只挑选与当前系统和架构匹配的资产，不会误装其他平台的包。
+- 优先走 GitHub API；**API 被限流（未登录每小时 60 次）或不可用时自动退回网页方式**读取最新版本。
 - 下载后校验文件大小，不一致则拒绝安装；替换由「等待退出 → 覆盖 → 重启」的批处理脚本完成。
 - 从源码运行时不会替换文件，只提供下载页入口。
-
-版本号由 `main.py` 中的 `APP_VERSION` 决定；发布新版本时同步修改它，并打上同名 tag（例如 `v1.6.0`）上传 EXE 资产。
 
 ## 模块与使用方法
 
@@ -76,6 +81,8 @@ python main.py
 
 - **网易云 NCM**：还原客户端下载得到的 `.ncm` 内嵌 FLAC/MP3 音频，并尽力写入歌曲名、歌手、专辑和封面。
 - **QQ 音乐**：支持旧格式 `.qmc0/.qmc3/.qmcflac/.qmcogg`（整文件静态异或）与新格式 `.mflac/.mflac0/.mflac1/.mgg/.mgg0/.mgg1/.mggl/.mmp4`（尾部内嵌密钥：TEA 保护 + Mask128 / 强化 RC4），自动识别长度前缀与 QTag 两种尾部，并在输出前校验音频头。新版 `STag` / `musicex` 格式不内嵌离线密钥，会给出明确提示。
+- **拖拽添加**：把加密文件或整个文件夹直接拖进队列即可批量添加（文件夹会递归扫描）。
+- **输出格式**：可选“原始格式”（最快、保真度最高）或转成 FLAC / WAV / MP3；转码需要 ffmpeg，转码失败时解密结果仍会保留。
 - 全部在本地完成、不上传任何文件，请仅用于你合法获得的文件。
 
 `qmc_decrypt.py` 为自包含纯 Python 实现；解密结果已与两个独立开源实现（MusicDecrypto、libtakiyasha）逐字节交叉验证，回归夹具见 `tests/data/qmc/`（由 `tools/make_qmc_fixtures.py` 生成的合成数据）。
@@ -90,34 +97,17 @@ python main.py
 
 > Beatport 下载依赖第三方命令行工具 `beatportdl.exe`。出于体积与再分发考虑，仓库不包含该文件；需要该功能时请自行获取并放入仓库的 `bin\` 目录（打包脚本会自动把它并入 EXE）。缺少它时其他模块不受影响。
 
-## 构建 EXE
+## 自行构建
 
 ```powershell
-python -m pip install pyinstaller
+python -m pip install -r requirements.txt pyinstaller
+python -m pytest tests -q
 pyinstaller --noconfirm --clean ShadowMusicGrabber.spec
 ```
 
-生成物为 `dist\ShadowMusicGrabber.exe`。spec 会收集 yt-dlp、customtkinter、gamdl、Crypto、mutagen；`bin\beatportdl.exe` 存在时一并打包。FFmpeg 不复制进 EXE，请确保目标机器可找到它，或把 `ffmpeg.exe` / `ffprobe.exe` 放在 EXE 同目录。
+生成物为 `dist\ShadowMusicGrabber.exe`。spec 会收集 yt-dlp、customtkinter、gamdl、Crypto、mutagen、tkinterdnd2；`bin\beatportdl.exe` 存在时一并打包。FFmpeg 不复制进 EXE，请确保目标机器可找到它，或把 `ffmpeg.exe` / `ffprobe.exe` 放在 EXE 同目录。
 
-## 发布新版本
-
-1. 修改 `main.py` 里的 `APP_VERSION`（例如 `1.8.1`）。
-2. 跑测试：`python -m unittest discover tests`。
-3. 打包：`python -m PyInstaller --noconfirm --clean ShadowMusicGrabber.spec`。
-4. 在 GitHub 建一个**同名 tag** 的 Release（例如 `v1.8.1`），把 `dist\ShadowMusicGrabber.exe` 传上去。
-
-> 程序内的「检查更新」只看 Releases，所以版本号、tag、Release 三者保持一致即可。
-> 想改成自动化（推 tag 自动跑测试+打包+发布）也可以：在 `.github/workflows/` 放一个 `on: push: tags: ["v*"]` 的工作流即可，
-> 但用于推送的 token 需要额外勾选 `workflow` 权限。
-
-## 测试
-
-```powershell
-python -m py_compile main.py converter.py downloader.py ncm_decrypt.py qmc_decrypt.py premium.py updater.py i18n.py
-python -m unittest discover tests -v
-```
-
-覆盖 URL 校验与平台识别、yt-dlp 选项、FFmpeg/ffprobe 定位、24-bit 音频转码、原子输出、NCM 封面段解析与 C 层 XOR 解密、元数据写入、**QQ 音乐 QMC 解密（v1/v2 全格式、真实测试向量、尾部/密钥链异常）**、Premium 参数校验与凭据自检、更新模块的版本比较/限流兜底，以及界面文案的翻译覆盖率。
+测试覆盖 URL 校验与平台识别、yt-dlp 选项、FFmpeg/ffprobe 定位、24-bit 音频转码、原子输出、NCM 封面段解析与 C 层 XOR 解密、元数据写入、QQ 音乐 QMC 解密（v1/v2 全格式、真实测试向量、尾部/密钥链异常）、Premium 参数校验与凭据自检、更新模块的版本比较/平台资产选择/限流兜底，以及界面文案的翻译覆盖率。
 
 ## 目录
 
@@ -130,6 +120,7 @@ ShadowMusicGrabber/
 ├── converter.py               # FFmpeg 本地转码
 ├── ncm_decrypt.py             # 网易云 .ncm 本地还原
 ├── qmc_decrypt.py             # QQ 音乐 QMC 本地还原(全格式)
+├── dragdrop.py                # 文件拖放支持(可选依赖 tkinterdnd2)
 ├── premium.py                 # gamdl / beatportdl 授权调用(含凭据自检)
 ├── ShadowMusicGrabber.spec    # PyInstaller 配置
 ├── assets/                    # 图标(icon.png / icon.ico)
