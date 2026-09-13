@@ -17,6 +17,8 @@ import subprocess
 import sys
 from typing import Callable, Optional
 
+import requests
+
 # BeatportDL 质量选项: (显示名, 配置值, 需要订阅档)
 BEATPORT_QUALITIES = {
     "FLAC 无损 (44.1kHz)": ("lossless", "Professional"),
@@ -82,6 +84,125 @@ def _find_beatportdl() -> Optional[str]:
     if os.path.exists(bundled):
         return bundled
     return shutil.which("beatportdl")
+
+
+# ---------------------------------------------------------------- 凭据自检
+
+_APPLE_HOMEPAGE_URL = "https://music.apple.com"
+_APPLE_ACCOUNT_INFO_API = "https://amp-api.music.apple.com/v1/me/account"
+_BEATPORT_LOGIN_API = "https://api.beatport.com/v4/auth/login/"
+_CHECK_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
+)
+
+
+def _apple_media_user_token(cookies_path: str) -> str:
+    """从 Netscape cookies.txt 中读取 media-user-token(没有则返回空串)。"""
+    from http.cookiejar import MozillaCookieJar
+
+    jar = MozillaCookieJar(cookies_path)
+    try:
+        jar.load(ignore_discard=True, ignore_expires=True)
+    except Exception as e:  # noqa: BLE001 - 统一转为 PremiumError
+        raise PremiumError(
+            "cookies.txt 解析失败: 请使用 Netscape 格式(浏览器扩展导出的原始文件)。"
+        ) from e
+    for cookie in jar:
+        if cookie.name == "media-user-token" and cookie.value:
+            return cookie.value
+    return ""
+
+
+def _apple_developer_token() -> str:
+    """与 gamdl 相同的方式:从 music.apple.com 页面脚本中提取开发者令牌。"""
+    try:
+        home = requests.get(
+            _APPLE_HOMEPAGE_URL, timeout=20, headers={"user-agent": _CHECK_USER_AGENT}
+        )
+        home.raise_for_status()
+    except Exception as e:  # noqa: BLE001
+        raise PremiumError("无法访问 music.apple.com: 请检查网络后重试。") from e
+    index_js = re.search(r"/(assets/index[~-][^/\"]+\.js)", home.text)
+    if not index_js:
+        raise PremiumError("无法从 Apple Music 页面提取令牌(页面结构可能已更新)。")
+    try:
+        script = requests.get(
+            f"{_APPLE_HOMEPAGE_URL}/{index_js.group(1)}",
+            timeout=20,
+            headers={"user-agent": _CHECK_USER_AGENT},
+        )
+        script.raise_for_status()
+    except Exception as e:  # noqa: BLE001
+        raise PremiumError("无法访问 music.apple.com: 请检查网络后重试。") from e
+    token = re.search(r'"(eyJ[A-Za-z0-9\-_]+\.eyJ[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]+)"', script.text)
+    if not token:
+        raise PremiumError("无法从 Apple Music 页面提取令牌(页面结构可能已更新)。")
+    return token.group(1)
+
+
+def check_apple_music_credentials(cookies_path: str) -> str:
+    """校验 Apple Music cookies 与订阅状态:返回结果描述,失败抛 PremiumError。"""
+    path = os.path.abspath(os.path.expanduser((cookies_path or "").strip()))
+    if not os.path.isfile(path):
+        raise PremiumError(
+            "未找到 cookies.txt。请先在 Apple Music 网页登录后,用浏览器扩展"
+            "(如 Get cookies.txt LOCALLY)导出 Netscape 格式 cookies。"
+        )
+    media_token = _apple_media_user_token(path)
+    if not media_token:
+        raise PremiumError("cookies 中没有 media-user-token: 请先登录 music.apple.com 再导出。")
+    dev_token = _apple_developer_token()
+    try:
+        resp = requests.get(
+            _APPLE_ACCOUNT_INFO_API,
+            params={"meta": "subscription"},
+            headers={
+                "authorization": f"Bearer {dev_token}",
+                "origin": _APPLE_HOMEPAGE_URL,
+                "cookie": f"media-user-token={media_token}",
+                "user-agent": _CHECK_USER_AGENT,
+            },
+            timeout=20,
+        )
+    except Exception as e:  # noqa: BLE001
+        raise PremiumError("无法访问 Apple Music 接口: 请检查网络后重试。") from e
+    if resp.status_code in (401, 403):
+        raise PremiumError("Apple cookies 已失效: 请重新登录 music.apple.com 并导出新的 cookies.txt。")
+    if not resp.ok:
+        raise PremiumError(f"Apple Music 接口返回 HTTP {resp.status_code}: 请稍后重试。")
+    try:
+        info = resp.json()
+    except ValueError as e:
+        raise PremiumError("Apple Music 接口返回了无法解析的数据。") from e
+    subscription = (info.get("meta") or {}).get("subscription") or {}
+    if not subscription.get("active"):
+        raise PremiumError("cookies 有效,但该 Apple 账号当前没有有效的 Apple Music 订阅。")
+    storefront = str(subscription.get("storefront") or "").upper() or "?"
+    return f"Apple Music 凭据有效,订阅正常(区域 {storefront})"
+
+
+def check_beatport_credentials(username: str, password: str) -> str:
+    """校验 Beatport 账号密码能否登录:返回结果描述,失败抛 PremiumError。"""
+    username = (username or "").strip()
+    if not username or not password:
+        raise PremiumError("请填写 Beatport 账号(用户名/密码)")
+    try:
+        resp = requests.post(
+            _BEATPORT_LOGIN_API,
+            json={"username": username, "password": password},
+            headers={"user-agent": _CHECK_USER_AGENT, "accept": "application/json"},
+            timeout=20,
+        )
+    except Exception as e:  # noqa: BLE001
+        raise PremiumError("无法访问 Beatport: 请检查网络后重试。") from e
+    if resp.status_code == 429:
+        raise PremiumError("Beatport 暂时限制了登录尝试: 请稍后再试。")
+    if resp.ok:
+        if any(cookie.name == "sessionid" for cookie in resp.cookies):
+            return "Beatport 凭据有效: 登录成功(可用音质取决于订阅档)。"
+        raise PremiumError("Beatport 响应异常(未返回会话): 请稍后重试。")
+    raise PremiumError("Beatport 账号或密码错误: 请检查后重试(连续失败可能触发人机验证)。")
 
 
 APP_DIR_NAME = "ShadowMusicGrabber"

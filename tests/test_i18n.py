@@ -8,7 +8,7 @@ import unittest
 import i18n
 
 PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent
-UI_SOURCES = ["main.py", "downloader.py", "converter.py", "ncm_decrypt.py", "premium.py", "updater.py"]
+UI_SOURCES = ["main.py", "downloader.py", "converter.py", "ncm_decrypt.py", "qmc_decrypt.py", "premium.py", "updater.py"]
 
 
 def _has_cjk(text: str) -> bool:

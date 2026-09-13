@@ -60,6 +60,7 @@ _EN = {
     # 标签页
     "链接下载": "Link download",
     "本地转码": "Local convert",
+    "解密": "Decrypt",
     "NCM 解密": "NCM decrypt",
     # 链接下载页
     "链接下载 · 适用范围与步骤": "Link download · scope and steps",
@@ -116,34 +117,38 @@ _EN = {
         "ffmpeg not found, cannot convert. Install ffmpeg and add it to PATH.",
     "当前转码队列中的文件都已完成。若要重新转码,请清空队列后重新添加。":
         "Every file in the convert queue is already done. Clear the queue and add them again to re-convert.",
-    # NCM 页
-    "NCM 解密 · 仅针对网易云音乐缓存文件": "NCM decrypt · NetEase Cloud Music cache files only",
-    "输入必须是网易云音乐下载得到的 .ncm 文件,不是网易云网页链接,也不支持 QQ 音乐 .qmc/.mflac 等加密格式。"
-    "步骤:选择输出目录 → 添加一个或多个 .ncm → 点“开始解密”。程序会在本地还原音频,尽力写入歌曲名、歌手、专辑和封面。"
+    # 解密页
+    "解密 · 网易云 NCM 与 QQ 音乐加密文件": "Decrypt · NetEase NCM & QQ Music encrypted files",
+    "支持网易云音乐下载得到的 .ncm 与 QQ 音乐加密文件(.qmc0/.qmc3/.qmcflac/.qmcogg,以及 .mflac/.mgg 等)。"
+    "步骤:选择输出目录 → 添加一个或多个加密文件 → 点“开始解密”。程序会在本地还原音频;NCM 会尽力写入歌曲名、歌手、专辑和封面,QQ 音乐文件自带标签会保留。"
     "不会上传文件;请只处理你拥有或明确获授权的内容。":
-        "Input must be .ncm files downloaded by the NetEase Cloud Music client — not web links, and not "
-        "QQ Music .qmc/.mflac. Steps: choose the output folder → add one or more .ncm files → click “Start "
-        "decrypt”. Decryption runs locally and writes title, artist, album and cover when available. "
-        "Nothing is uploaded; only process content you own or are authorized to handle.",
-    "添加 .ncm 文件…": "Add .ncm files…",
+        "Supports .ncm files downloaded by the NetEase Cloud Music client and QQ Music encrypted files "
+        "(.qmc0/.qmc3/.qmcflac/.qmcogg, .mflac/.mgg, etc.). Steps: choose the output folder → add one or "
+        "more encrypted files → click “Start decrypt”. Decryption runs locally; NCM files get title, "
+        "artist, album and cover written when available, and QQ Music tags are preserved. Nothing is "
+        "uploaded; only process content you own or are authorized to handle.",
+    "添加加密文件…": "Add encrypted files…",
     "开始解密": "Start decrypt",
     "解密队列": "Decrypt queue",
-    "NCM 解密队列": "NCM decrypt queue",
-    "选择 .ncm 文件": "Select .ncm files",
+    "选择加密音乐文件": "Select encrypted music files",
     "所有文件": "All files",
+    "加密音乐文件": "Encrypted music files",
     "网易云音乐 NCM": "NetEase Cloud Music NCM",
-    "请先添加 .ncm 文件": "Add .ncm files first",
-    "当前 NCM 队列中的文件都已完成。若要重新解密,请清空队列后重新添加。":
-        "Every file in the NCM queue is already done. Clear the queue and add them again to re-decrypt.",
+    "QQ 音乐 QMC": "QQ Music QMC",
+    "请先添加要解密的文件": "Add files to decrypt first",
+    "当前解密队列中的文件都已完成。若要重新解密,请清空队列后重新添加。":
+        "Every file in the decrypt queue is already done. Clear the queue and add them again to re-decrypt.",
     # Premium 页
     "付费平台 · 需要你自己的官方订阅和授权": "Paid platforms · requires your own subscription and authorization",
     "Apple Music 需要有效订阅和浏览器导出的 Netscape cookies.txt;Beatport 需要自己的账号及对应流媒体方案。"
     "这些入口只调用第三方工具处理你有权访问的内容,不绕过 DRM、订阅或地区限制。"
-    "遇到 cookies 过期、方案不匹配或区域限制时,请根据日志处理。":
+    "遇到 cookies 过期、方案不匹配或区域限制时,请根据日志处理。"
+    "下载前可先用“凭据自检”验证 cookies 与 Beatport 账号是否有效。":
         "Apple Music needs an active subscription plus a Netscape cookies.txt exported from your browser; "
         "Beatport needs your own account and matching streaming plan. These entries only call third-party "
         "tools for content you are entitled to access and never bypass DRM, subscriptions or regional "
-        "limits. Check the log when cookies expire or the plan/region does not match.",
+        "limits. Check the log when cookies expire or the plan/region does not match. Use “Check "
+        "credentials” to verify your cookies and Beatport account first.",
     "Apple Music  ·  需订阅 + cookies": "Apple Music  ·  subscription + cookies required",
     "1. 浏览器登录 music.apple.com 后,用扩展导出 cookies.txt(Netscape 格式)\n"
     "2. 选择 cookies 文件,粘贴链接,选择音质,点下载":
@@ -231,6 +236,55 @@ _EN = {
     "NCM 文件损坏(元数据长度非法)": "Corrupted NCM file (invalid metadata length)",
     "只支持 .ncm 文件": "Only .ncm files are supported",
     "未找到 ffmpeg,无法将内嵌 MP3 转码为 FLAC": "ffmpeg not found; cannot convert the embedded MP3 to FLAC",
+    # QMC / QQ 音乐解密模块的提示
+    "解密结果不是有效的音频: 密钥不匹配或该文件使用了更新的加密格式":
+        "Decrypted output is not valid audio: key mismatch or a newer unsupported format",
+    "密钥密文长度非法": "Invalid encrypted-key length",
+    "密钥密文填充异常": "Unexpected encrypted-key padding",
+    "密钥校验失败(可能是未知的新格式或文件损坏)":
+        "Key validation failed (possibly an unknown new format or a corrupted file)",
+    "文件太小,不是有效的 QMC 文件": "File is too small to be a valid QMC file",
+    "检测到更新的 STag 加密格式: 该格式不内嵌密钥,无法离线解密":
+        "Newer STag encryption detected: it embeds no key and cannot be decrypted offline",
+    "检测到 musicex 加密格式: 该格式暂不受支持": "musicex encryption detected: not supported yet",
+    "无法解析文件尾部密钥(可能是未知的新加密格式)":
+        "Cannot parse the embedded key at the end of the file (possibly a newer unsupported format)",
+    "尾部密钥为空": "The embedded key is empty",
+    "QTag 数据不完整": "Incomplete QTag data",
+    "QTag 数据长度非法": "Invalid QTag data length",
+    "文件不含音频数据": "The file contains no audio data",
+    "文件读取不完整": "Incomplete file read",
+    "RC4 密钥无效": "Invalid RC4 key",
+    "xor 长度不一致": "xor length mismatch",
+    # 凭据自检(Apple / Beatport)
+    "凭据自检": "Check credentials",
+    "自检完成": "Check completed",
+    "请先填写要检查的凭据(Apple cookies 或 Beatport 账号)":
+        "Enter the credentials to check first (Apple cookies or Beatport account)",
+    "未填写 Apple cookies,已跳过 Apple 检查": "Apple cookies not filled in — Apple check skipped",
+    "未填写 Beatport 账号,已跳过 Beatport 检查": "Beatport account not filled in — Beatport check skipped",
+    "cookies.txt 解析失败: 请使用 Netscape 格式(浏览器扩展导出的原始文件)。":
+        "Failed to parse cookies.txt: use the Netscape format (the raw file exported by a browser extension).",
+    "无法访问 music.apple.com: 请检查网络后重试。": "Cannot reach music.apple.com: check your network and try again.",
+    "无法从 Apple Music 页面提取令牌(页面结构可能已更新)。":
+        "Could not extract a token from the Apple Music page (the page structure may have changed).",
+    "cookies 中没有 media-user-token: 请先登录 music.apple.com 再导出。":
+        "The cookies contain no media-user-token: sign in on music.apple.com and export again.",
+    "无法访问 Apple Music 接口: 请检查网络后重试。":
+        "Cannot reach the Apple Music API: check your network and try again.",
+    "Apple cookies 已失效: 请重新登录 music.apple.com 并导出新的 cookies.txt。":
+        "Apple cookies have expired: sign in on music.apple.com again and export a new cookies.txt.",
+    "Apple Music 接口返回了无法解析的数据。": "The Apple Music API returned unreadable data.",
+    "cookies 有效,但该 Apple 账号当前没有有效的 Apple Music 订阅。":
+        "The cookies are valid, but this Apple account has no active Apple Music subscription.",
+    "无法访问 Beatport: 请检查网络后重试。": "Cannot reach Beatport: check your network and try again.",
+    "Beatport 暂时限制了登录尝试: 请稍后再试。": "Beatport is rate-limiting login attempts: try again later.",
+    "Beatport 凭据有效: 登录成功(可用音质取决于订阅档)。":
+        "Beatport credentials are valid: sign-in succeeded (available quality depends on your plan).",
+    "Beatport 响应异常(未返回会话): 请稍后重试。":
+        "Unexpected Beatport response (no session returned): try again later.",
+    "Beatport 账号或密码错误: 请检查后重试(连续失败可能触发人机验证)。":
+        "Wrong Beatport username or password: check and retry (repeated failures may trigger a captcha).",
     "文件内容全为 0，疑似未完成下载或云盘占位文件；请重新下载/同步后再试":
         "The file is entirely zeros — likely an unfinished download or a cloud placeholder; "
         "download or sync it again",
@@ -269,6 +323,12 @@ _PREFIXES = (
     ("解析失败: ", "Resolve failed: "),
     ("只支持 .ncm 文件: ", "Only .ncm files are supported: "),
     ("不支持的格式: ", "Unsupported format: "),
+    ("不支持该文件类型: ", "Unsupported file type: "),
+    ("不支持的文件类型: ", "Unsupported file type: "),
+    ("密钥解析失败: ", "Key parsing failed: "),
+    ("密钥 Base64 解码失败: ", "Key Base64 decoding failed: "),
+    ("解密后的密钥长度异常: ", "Unexpected key length after decryption: "),
+    ("文件不存在: ", "File not found: "),
     ("剩余 ", "ETA "),
 )
 
@@ -301,12 +361,16 @@ _PATTERNS = (
     (re.compile(r"^提示:仅处理(.+)$"), "Note: only process{0}"),
     # 组合文案：中文出现在中间，需要整体重排
     (re.compile(r"^已加入 (.+) 个任务$"), "Queued {0} task(s)"),
-    (re.compile(r"^已添加 (.+) 个 \.ncm 文件$"), "Added {0} .ncm file(s)"),
+    (re.compile(r"^已添加 (.+) 个加密文件$"), "Added {0} encrypted file(s)"),
     (re.compile(r"^已添加 (.+) 个转码文件$"), "Added {0} file(s) to convert"),
     (re.compile(r"^✓ Apple Music 完成,(.+) 个文件$"), "✓ Apple Music finished: {0} file(s)"),
     (re.compile(r"^✓ Apple Music 下载完成: (.+) 个文件$"), "✓ Apple Music finished: {0} file(s)"),
     (re.compile(r"^✓ Beatport 完成,(.+) 个文件$"), "✓ Beatport finished: {0} file(s)"),
     (re.compile(r"^✓ Beatport 下载完成: (.+) 个文件$"), "✓ Beatport finished: {0} file(s)"),
+    (re.compile(r"^Apple Music 凭据有效,订阅正常\(区域 (.+)\)$"),
+     "Apple Music credentials are valid; subscription active (storefront {0})"),
+    (re.compile(r"^Apple Music 接口返回 HTTP (\d+): 请稍后重试。$"),
+     "The Apple Music API returned HTTP {0}: try again later."),
     (re.compile(r"^(.+)正在运行。请等待当前批次完成后再修改队列。$"),
      "{0} is running. Wait for the current batch to finish before changing the queue."),
     (re.compile(r"^更新服务返回 HTTP (\d+)。$"), "Update service returned HTTP {0}."),

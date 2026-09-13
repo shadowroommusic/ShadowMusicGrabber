@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """音乐抓取与无损转码工具 - Windows 桌面版。
 
-提供公开链接下载、本地转码，以及用户自有网易云 .ncm 文件的本地还原。
+提供公开链接下载、本地转码,以及用户自有网易云 .ncm 与 QQ 音乐加密文件(.qmc/.mflac/.mgg 等)的本地还原。
 不包含 DRM、订阅、地区或访问限制绕过能力。
 """
 
@@ -23,10 +23,11 @@ import downloader
 import i18n
 import ncm_decrypt
 import premium
+import qmc_decrypt
 import updater
 
 APP_NAME = "Shadow MusicGrabber"
-APP_VERSION = "1.7.1"
+APP_VERSION = "1.8.0"
 
 # 界面语言：先读已保存的设置，否则按系统语言；控件在构造时由 i18n 统一翻译。
 i18n.install()
@@ -309,7 +310,7 @@ class App(ctk.CTk):
 
         tab_dl = self.tabs.add("链接下载")
         tab_cv = self.tabs.add("本地转码")
-        tab_ncm = self.tabs.add("NCM 解密")
+        tab_ncm = self.tabs.add("解密")
         tab_am = self.tabs.add("Apple/Beatport")
 
         self._build_download_tab(tab_dl)
@@ -479,9 +480,9 @@ class App(ctk.CTk):
     def _build_ncm_tab(self, parent):
         self._guide(
             parent,
-            "NCM 解密 · 仅针对网易云音乐缓存文件",
-            "输入必须是网易云音乐下载得到的 .ncm 文件,不是网易云网页链接,也不支持 QQ 音乐 .qmc/.mflac 等加密格式。"
-            "步骤:选择输出目录 → 添加一个或多个 .ncm → 点“开始解密”。程序会在本地还原音频,尽力写入歌曲名、歌手、专辑和封面。"
+            "解密 · 网易云 NCM 与 QQ 音乐加密文件",
+            "支持网易云音乐下载得到的 .ncm 与 QQ 音乐加密文件(.qmc0/.qmc3/.qmcflac/.qmcogg,以及 .mflac/.mgg 等)。"
+            "步骤:选择输出目录 → 添加一个或多个加密文件 → 点“开始解密”。程序会在本地还原音频;NCM 会尽力写入歌曲名、歌手、专辑和封面,QQ 音乐文件自带标签会保留。"
             "不会上传文件;请只处理你拥有或明确获授权的内容。",
         )
 
@@ -497,13 +498,13 @@ class App(ctk.CTk):
         self._button(
             row,
             "打开目录",
-            lambda: self._open_output_dir(self.ncm_out_var.get(), "NCM 解密"),
+            lambda: self._open_output_dir(self.ncm_out_var.get(), "解密"),
             width=92,
         ).pack(side="left", padx=(6, 0))
 
         btn_frame = ctk.CTkFrame(parent, fg_color="transparent")
         btn_frame.pack(fill="x", padx=10, pady=6)
-        self._button(btn_frame, "添加 .ncm 文件…", self._pick_ncm_files, width=150).pack(side="left")
+        self._button(btn_frame, "添加加密文件…", self._pick_ncm_files, width=150).pack(side="left")
         self._button(btn_frame, "开始解密", self._start_ncm_decrypt, primary=True, width=140).pack(side="left", padx=8)
         self._button(btn_frame, "清空列表", self._clear_ncm_list, width=100).pack(side="left")
 
@@ -516,7 +517,8 @@ class App(ctk.CTk):
         self.ncm_container = ctk.CTkScrollableFrame(list_frame, fg_color="#0f0f10")
         self.ncm_container.pack(fill="both", expand=True, padx=6, pady=6)
 
-        self.ncm_tasks: list[ncm_decrypt.NcmTask] = []
+        # 解密队列混合 NcmTask 与 QmcTask(两者接口一致)
+        self.ncm_tasks: list = []
         self.ncm_rows: list[TaskRow] = []
         self.ncm_progress_bar = ctk.CTkProgressBar(
             parent, height=10, fg_color="#303035", progress_color=ACCENT
@@ -525,35 +527,48 @@ class App(ctk.CTk):
         self.ncm_progress_bar.set(0)
 
     def _pick_ncm_out(self):
-        if not self._require_idle("ncm", "NCM 解密"):
+        if not self._require_idle("ncm", "解密"):
             return
         d = filedialog.askdirectory(initialdir=self.ncm_out_var.get() or os.path.expanduser("~"))
         if d:
             self.ncm_out_var.set(d)
 
     def _pick_ncm_files(self):
-        if not self._require_idle("ncm", "NCM 解密队列"):
+        if not self._require_idle("ncm", "解密队列"):
             return
+        qmc_patterns = " ".join(qmc_decrypt.QMC_PATTERNS)
         files = filedialog.askopenfilenames(
-            title="选择 .ncm 文件",
-            filetypes=[("网易云音乐 NCM", "*.ncm"), ("所有文件", "*.*")],
+            title="选择加密音乐文件",
+            filetypes=[
+                ("加密音乐文件", f"*.ncm {qmc_patterns}"),
+                ("网易云音乐 NCM", "*.ncm"),
+                ("QQ 音乐 QMC", qmc_patterns),
+                ("所有文件", "*.*"),
+            ],
         )
+        added = 0
         for f in files:
-            if not f.lower().endswith(".ncm"):
-                messagebox.showwarning("提示", f"只支持 .ncm 文件: {f}")
+            ext = os.path.splitext(f)[1].lower()
+            if ext == ".ncm":
+                dst = ncm_decrypt.make_output_path(f, self.ncm_out_var.get())
+                task = ncm_decrypt.NcmTask(src=f, dst=dst)
+            elif ext in qmc_decrypt.QMC_EXTS:
+                dst = qmc_decrypt.make_output_path(f, self.ncm_out_var.get())
+                task = qmc_decrypt.QmcTask(src=f, dst=dst)
+            else:
+                messagebox.showwarning("提示", f"不支持该文件类型: {f}")
                 continue
             if any(t.src == f for t in self.ncm_tasks):
                 continue
-            dst = ncm_decrypt.make_output_path(f, self.ncm_out_var.get())
-            task = ncm_decrypt.NcmTask(src=f, dst=dst)
             self.ncm_tasks.append(task)
             row = TaskRow(self.ncm_container, task)
             row.title_lbl.configure(text=os.path.basename(f), width=400)
             self.ncm_rows.append(row)
-        self._log(f"已添加 {len(files)} 个 .ncm 文件")
+            added += 1
+        self._log(f"已添加 {added} 个加密文件")
 
     def _clear_ncm_list(self):
-        if not self._require_idle("ncm", "NCM 解密队列"):
+        if not self._require_idle("ncm", "解密队列"):
             return
         self.ncm_tasks.clear()
         for row in self.ncm_rows:
@@ -563,16 +578,16 @@ class App(ctk.CTk):
 
     def _start_ncm_decrypt(self):
         if not self.ncm_tasks:
-            messagebox.showwarning("提示", "请先添加 .ncm 文件")
+            messagebox.showwarning("提示", "请先添加要解密的文件")
             return
         pending = [task for task in self.ncm_tasks if task.status != "完成"]
         if not pending:
-            messagebox.showinfo("没有待处理任务", "当前 NCM 队列中的文件都已完成。若要重新解密,请清空队列后重新添加。")
+            messagebox.showinfo("没有待处理任务", "当前解密队列中的文件都已完成。若要重新解密,请清空队列后重新添加。")
             return
         if not self._begin_job("ncm", len(pending)):
             return
         self.ncm_progress_bar.set(0)
-        out_dir = self._ensure_output_dir(self.ncm_out_var.get(), "NCM 解密")
+        out_dir = self._ensure_output_dir(self.ncm_out_var.get(), "解密")
         if not out_dir:
             self._running_jobs.discard("ncm")
             self._job_remaining.pop("ncm", None)
@@ -583,14 +598,17 @@ class App(ctk.CTk):
                 task.error = ""
                 task.status = "排队中"
                 task.set_progress(0.0)
-                task.dst = ncm_decrypt.make_output_path(task.src, out_dir, reserved)
+                if isinstance(task, ncm_decrypt.NcmTask):
+                    task.dst = ncm_decrypt.make_output_path(task.src, out_dir, reserved)
+                else:
+                    task.dst = qmc_decrypt.make_output_path(task.src, out_dir, reserved)
             threading.Thread(target=self._ncm_worker, args=(pending,), daemon=True).start()
         except Exception:
             self._running_jobs.discard("ncm")
             self._job_remaining.pop("ncm", None)
             raise
 
-    def _ncm_worker(self, tasks: list[ncm_decrypt.NcmTask]):
+    def _ncm_worker(self, tasks: list):
         total = len(tasks)
         for i, task in enumerate(tasks):
             task.status = "解密中…"
@@ -602,12 +620,16 @@ class App(ctk.CTk):
                     self.ui_queue.put(("ncm_progress", task))
 
             try:
-                dst, meta = ncm_decrypt.decrypt_file(
-                    task.src, task.dst, on_progress=on_progress, ffmpeg=self.ffmpeg)
+                if isinstance(task, ncm_decrypt.NcmTask):
+                    dst, meta = ncm_decrypt.decrypt_file(
+                        task.src, task.dst, on_progress=on_progress, ffmpeg=self.ffmpeg)
+                else:
+                    dst, meta = qmc_decrypt.decrypt_file(
+                        task.src, task.dst, on_progress=on_progress)
                 task.status = "完成"
                 task.set_progress(100.0)
                 self.ui_queue.put(("ncm_refresh", task))
-                name = meta.music_name or os.path.basename(dst)
+                name = getattr(meta, "music_name", "") or os.path.basename(dst)
                 self.ui_queue.put(("log", f"✓ 解密完成: {name} -> {dst}"))
             except Exception as e:
                 task.status = "失败"
@@ -628,7 +650,8 @@ class App(ctk.CTk):
             parent,
             "付费平台 · 需要你自己的官方订阅和授权",
             "Apple Music 需要有效订阅和浏览器导出的 Netscape cookies.txt;Beatport 需要自己的账号及对应流媒体方案。"
-            "这些入口只调用第三方工具处理你有权访问的内容,不绕过 DRM、订阅或地区限制。遇到 cookies 过期、方案不匹配或区域限制时,请根据日志处理。",
+            "这些入口只调用第三方工具处理你有权访问的内容,不绕过 DRM、订阅或地区限制。遇到 cookies 过期、方案不匹配或区域限制时,请根据日志处理。"
+            "下载前可先用“凭据自检”验证 cookies 与 Beatport 账号是否有效。",
         )
         # ---- Apple Music ----
         am_frame = ctk.CTkFrame(
@@ -766,6 +789,13 @@ class App(ctk.CTk):
         self.bp_status = ctk.CTkLabel(bp_frame, text="待命", anchor="w", text_color=MUTED)
         self.bp_status.pack(fill="x", padx=10, pady=(0, 8))
 
+        # ---- 凭据自检: 先验证 cookies / 账号是否可用, 再开始下载 ----
+        check_row = ctk.CTkFrame(parent, fg_color="transparent")
+        check_row.pack(fill="x", padx=10, pady=(2, 12))
+        self._button(check_row, "凭据自检", self._start_credential_check, width=120).pack(side="left")
+        self.cred_check_status = ctk.CTkLabel(check_row, text="", anchor="w", text_color=MUTED)
+        self.cred_check_status.pack(side="left", fill="x", expand=True, padx=8)
+
         self.premium_status_labels = {"apple_music": self.am_status, "beatport": self.bp_status}
 
     def _pick_am_cookies(self):
@@ -791,6 +821,47 @@ class App(ctk.CTk):
 
     def _set_premium_status(self, service: str, text: str):
         self.ui_queue.put(("premium_status", service, text))
+
+    def _start_credential_check(self):
+        cookies = self.am_cookies_var.get().strip()
+        user = self.bp_user_var.get().strip()
+        password = self.bp_pass_var.get()
+        if not cookies and not (user and password):
+            messagebox.showwarning("提示", "请先填写要检查的凭据(Apple cookies 或 Beatport 账号)")
+            return
+        if not self._begin_job("cred_check"):
+            return
+        self.cred_check_status.configure(text="检查中…")
+        threading.Thread(
+            target=self._credential_check_worker,
+            args=(cookies, user, password),
+            daemon=True,
+        ).start()
+
+    def _credential_check_worker(self, cookies: str, user: str, password: str):
+        lines: list[str] = []
+        if cookies:
+            try:
+                lines.append(
+                    f"✓ Apple Music: {i18n.tr(premium.check_apple_music_credentials(cookies))}"
+                )
+            except Exception as e:
+                lines.append(f"✗ Apple Music: {i18n.tr(str(e))}")
+        else:
+            lines.append(i18n.tr("未填写 Apple cookies,已跳过 Apple 检查"))
+        if user and password:
+            try:
+                lines.append(
+                    f"✓ Beatport: {i18n.tr(premium.check_beatport_credentials(user, password))}"
+                )
+            except Exception as e:
+                lines.append(f"✗ Beatport: {i18n.tr(str(e))}")
+        else:
+            lines.append(i18n.tr("未填写 Beatport 账号,已跳过 Beatport 检查"))
+        for line in lines:
+            self.ui_queue.put(("log", line))
+        self.ui_queue.put(("cred_result", lines))
+        self._end_job("cred_check")
 
     def _on_am_codec_change(self, label: str):
         codec = premium.GAMDL_CODECS.get(i18n.untr(label))
@@ -1267,6 +1338,9 @@ class App(ctk.CTk):
                     label = self.premium_status_labels.get(service)
                     if label is not None:
                         label.configure(text=text)
+                elif kind == "cred_result":
+                    self.cred_check_status.configure(text="自检完成")
+                    messagebox.showinfo("凭据自检", "\n".join(msg[1]))
                 elif kind == "job_done":
                     self._finish_job(msg[1])
                 elif kind == "update_error":

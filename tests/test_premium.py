@@ -128,5 +128,150 @@ class TestBeatportProcess(unittest.TestCase):
         self.assertTrue(proc.stdin.closed)
 
 
+class _FakeResponse:
+    """凭据自检测试用的假 HTTP 响应。"""
+
+    def __init__(self, status_code=200, text="", payload=None, cookies=()):
+        self.status_code = status_code
+        self.text = text
+        self._payload = payload
+        self.cookies = list(cookies)
+
+    @property
+    def ok(self):
+        return 200 <= self.status_code < 400
+
+    def json(self):
+        if self._payload is None:
+            raise ValueError("no JSON body")
+        return self._payload
+
+    def raise_for_status(self):
+        if not self.ok:
+            raise RuntimeError(f"HTTP {self.status_code}")
+
+
+class _FakeCookie:
+    def __init__(self, name, value):
+        self.name = name
+        self.value = value
+
+
+def _write_cookies_file(path, include_token=True):
+    lines = ["# Netscape HTTP Cookie File"]
+    if include_token:
+        lines.append(".music.apple.com\tTRUE\t/\tTRUE\t1999999999\tmedia-user-token\tTOKEN-VALUE-123")
+    lines.append(".music.apple.com\tTRUE\t/\tTRUE\t1999999999\titspod\tXYZ")
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(lines) + "\n")
+    return path
+
+
+def _apple_fake_get(account_response, calls=None):
+    def fake_get(url, **kwargs):
+        if calls is not None:
+            calls.append((url, kwargs))
+        if url == premium._APPLE_HOMEPAGE_URL:
+            return _FakeResponse(200, text='<script src="/assets/index~abc123.js"></script>')
+        if "/assets/" in url:
+            return _FakeResponse(200, text='"eyJhbGciOiJFUzI1NiJ9.eyJpc3MiOiJ0ZXN0In0.c2lnbmF0dXJl"')
+        if url == premium._APPLE_ACCOUNT_INFO_API:
+            return account_response
+        raise AssertionError(f"unexpected url: {url}")
+
+    return fake_get
+
+
+class TestAppleCredentialCheck(unittest.TestCase):
+    def test_missing_cookies_file(self):
+        with tempfile.TemporaryDirectory() as td:
+            with self.assertRaises(premium.PremiumError):
+                premium.check_apple_music_credentials(os.path.join(td, "nope.txt"))
+
+    def test_cookies_without_media_user_token(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = _write_cookies_file(os.path.join(td, "cookies.txt"), include_token=False)
+            with self.assertRaises(premium.PremiumError) as ctx:
+                premium.check_apple_music_credentials(path)
+            self.assertIn("media-user-token", str(ctx.exception))
+
+    def test_expired_cookies(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = _write_cookies_file(os.path.join(td, "cookies.txt"))
+            with patch("premium.requests.get", side_effect=_apple_fake_get(_FakeResponse(401, payload={}))):
+                with self.assertRaises(premium.PremiumError) as ctx:
+                    premium.check_apple_music_credentials(path)
+            self.assertIn("失效", str(ctx.exception))
+
+    def test_no_active_subscription(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = _write_cookies_file(os.path.join(td, "cookies.txt"))
+            account = _FakeResponse(200, payload={"meta": {"subscription": {"active": False}}})
+            with patch("premium.requests.get", side_effect=_apple_fake_get(account)):
+                with self.assertRaises(premium.PremiumError) as ctx:
+                    premium.check_apple_music_credentials(path)
+            self.assertIn("订阅", str(ctx.exception))
+
+    def test_success_sends_media_user_token(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = _write_cookies_file(os.path.join(td, "cookies.txt"))
+            account = _FakeResponse(
+                200, payload={"meta": {"subscription": {"active": True, "storefront": "us"}}}
+            )
+            calls = []
+            with patch("premium.requests.get", side_effect=_apple_fake_get(account, calls)):
+                msg = premium.check_apple_music_credentials(path)
+        self.assertIn("凭据有效", msg)
+        self.assertIn("US", msg)
+        account_calls = [kwargs for url, kwargs in calls if url == premium._APPLE_ACCOUNT_INFO_API]
+        self.assertEqual(len(account_calls), 1)
+        headers = account_calls[0]["headers"]
+        self.assertEqual(headers["cookie"], "media-user-token=TOKEN-VALUE-123")
+        self.assertTrue(headers["authorization"].startswith("Bearer eyJ"))
+
+
+class TestBeatportCredentialCheck(unittest.TestCase):
+    def test_empty_credentials(self):
+        with self.assertRaises(premium.PremiumError):
+            premium.check_beatport_credentials("", "")
+        with self.assertRaises(premium.PremiumError):
+            premium.check_beatport_credentials("user", "")
+
+    def test_success(self):
+        captured = {}
+
+        def fake_post(url, **kwargs):
+            captured["url"] = url
+            captured["json"] = kwargs.get("json")
+            return _FakeResponse(200, cookies=[_FakeCookie("sessionid", "s3cr3t")])
+
+        with patch("premium.requests.post", side_effect=fake_post):
+            msg = premium.check_beatport_credentials("user@example.com", "pw")
+        self.assertIn("凭据有效", msg)
+        self.assertEqual(captured["url"], premium._BEATPORT_LOGIN_API)
+        self.assertEqual(captured["json"], {"username": "user@example.com", "password": "pw"})
+
+    def test_wrong_password(self):
+        with patch("premium.requests.post", return_value=_FakeResponse(400, payload={"detail": "bad"})):
+            with self.assertRaises(premium.PremiumError) as ctx:
+                premium.check_beatport_credentials("user", "pw")
+        self.assertIn("账号或密码错误", str(ctx.exception))
+
+    def test_rate_limited(self):
+        with patch("premium.requests.post", return_value=_FakeResponse(429)):
+            with self.assertRaises(premium.PremiumError):
+                premium.check_beatport_credentials("user", "pw")
+
+    def test_success_without_session_cookie_is_error(self):
+        with patch("premium.requests.post", return_value=_FakeResponse(200, cookies=[])):
+            with self.assertRaises(premium.PremiumError):
+                premium.check_beatport_credentials("user", "pw")
+
+    def test_network_error(self):
+        with patch("premium.requests.post", side_effect=OSError("boom")):
+            with self.assertRaises(premium.PremiumError):
+                premium.check_beatport_credentials("user", "pw")
+
+
 if __name__ == "__main__":
     unittest.main()
