@@ -97,6 +97,42 @@ python main.py
 
 > Beatport 下载依赖第三方命令行工具 `beatportdl.exe`。出于体积与再分发考虑，仓库不包含该文件；需要该功能时请自行获取并放入仓库的 `bin\` 目录（打包脚本会自动把它并入 EXE）。缺少它时其他模块不受影响。
 
+### 5. MCP 服务（供 AI Agent 调用）
+
+仓库内置一个 MCP 服务（`mcp_server.py`），把解密、转码、下载、探测能力直接暴露给 Claude Desktop / Cursor / Shadow 等 AI 客户端，不用打开图形界面。它不依赖任何第三方 MCP SDK，直接复用同一套核心模块。
+
+用 `uvx` 直接运行（无需克隆仓库、无需手动装依赖）：
+
+```json
+{
+  "mcpServers": {
+    "shadow-musicgrabber": {
+      "command": "uvx",
+      "args": [
+        "--from", "git+https://github.com/shadowroommusic/ShadowMusicGrabber",
+        "shadow-musicgrabber-mcp"
+      ]
+    }
+  }
+}
+```
+
+也可以从本地源码运行：`python mcp_server.py`（同样使用 stdin/stdout 的 stdio 传输）。
+
+提供的工具：
+
+| 工具 | 作用 |
+| --- | --- |
+| `probe_audio` | 读取本地音频的时长、码率、采样率与标签 |
+| `decrypt_audio` | 解密单个 NCM / QQ 音乐文件，可顺带转码 |
+| `decrypt_many` | 批量解密（支持目录递归） |
+| `convert_audio` | 本地转码为 FLAC / WAV / MP3 |
+| `probe_url` | 只解析链接信息（标题、时长），不下载 |
+| `download_audio` | 从公开链接下载音频 |
+| `get_capabilities` | 查询版本、ffmpeg 状态与支持的格式 |
+
+解密与转码全部在本地完成；转码及部分下载格式需要系统能找到 ffmpeg（与图形版要求相同）。
+
 ## 自行构建
 
 ```powershell
@@ -107,7 +143,7 @@ pyinstaller --noconfirm --clean ShadowMusicGrabber.spec
 
 生成物为 `dist\ShadowMusicGrabber.exe`。spec 会收集 yt-dlp、customtkinter、gamdl、Crypto、mutagen、tkinterdnd2；`bin\beatportdl.exe` 存在时一并打包。FFmpeg 不复制进 EXE，请确保目标机器可找到它，或把 `ffmpeg.exe` / `ffprobe.exe` 放在 EXE 同目录。
 
-测试覆盖 URL 校验与平台识别、yt-dlp 选项、FFmpeg/ffprobe 定位、24-bit 音频转码、原子输出、NCM 封面段解析与 C 层 XOR 解密、元数据写入、QQ 音乐 QMC 解密（v1/v2 全格式、真实测试向量、尾部/密钥链异常）、Premium 参数校验与凭据自检、更新模块的版本比较/平台资产选择/限流兜底，以及界面文案的翻译覆盖率。
+测试覆盖 URL 校验与平台识别、yt-dlp 选项、FFmpeg/ffprobe 定位、24-bit 音频转码、原子输出、NCM 封面段解析与 C 层 XOR 解密、元数据写入、QQ 音乐 QMC 解密（v1/v2 全格式、真实测试向量、尾部/密钥链异常）、Premium 参数校验与凭据自检、更新模块的版本比较/平台资产选择/限流兜底、MCP 服务的协议与工具接口，以及界面文案的翻译覆盖率。
 
 ## 目录
 
@@ -122,6 +158,8 @@ ShadowMusicGrabber/
 ├── qmc_decrypt.py             # QQ 音乐 QMC 本地还原(全格式)
 ├── dragdrop.py                # 文件拖放支持(可选依赖 tkinterdnd2)
 ├── premium.py                 # gamdl / beatportdl 授权调用(含凭据自检)
+├── mcp_server.py              # MCP 服务(stdio, 供 AI Agent 调用)
+├── pyproject.toml             # MCP 服务的 uvx / pip 打包声明
 ├── ShadowMusicGrabber.spec    # PyInstaller 配置
 ├── assets/                    # 图标(icon.png / icon.ico)
 ├── tools/make_icon.py         # 图标生成脚本
