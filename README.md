@@ -4,6 +4,8 @@
 
 Windows 桌面工具，四个彼此独立的工作模块：公开链接下载、本地音频转码、网易云 NCM 与 QQ 音乐加密文件还原，以及需要用户自己订阅和账号的 Apple Music / Beatport 下载。深色极简界面，**支持中英文双语**，内置 GitHub Releases 自动更新。
 
+除了图形界面，仓库还内置一个 **MCP 服务**，可以让 Claude / Cursor / Shadow 等 AI 助手直接调用同一套能力——见 [使用方式二](#使用方式二接入-ai-agentmcp-服务)。
+
 [![Latest release](https://img.shields.io/github/v/release/shadowroommusic/ShadowMusicGrabber?label=release)](https://github.com/shadowroommusic/ShadowMusicGrabber/releases/latest)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
@@ -13,7 +15,7 @@ Windows 桌面工具，四个彼此独立的工作模块：公开链接下载、
 | --- | --- |
 | ![中文界面](docs/screenshot-zh.png) | ![English UI](docs/screenshot-en.png) |
 
-A Windows desktop toolbox with four independent modules: public link downloading, local audio conversion, NetEase Cloud Music `.ncm` and QQ Music encrypted-file decryption, and Apple Music / Beatport downloading for accounts you own. Dark minimal UI with **Chinese/English interface** and built-in GitHub Releases auto-update.
+A Windows desktop toolbox with four independent modules: public link downloading, local audio conversion, NetEase Cloud Music `.ncm` and QQ Music encrypted-file decryption, and Apple Music / Beatport downloading for accounts you own. Dark minimal UI with **Chinese/English interface** and built-in GitHub Releases auto-update. The repository also ships an **MCP server** so AI clients (Claude, Cursor, Shadow ...) can drive the same engine.
 
 项目主页 / Repository: <https://github.com/shadowroommusic/ShadowMusicGrabber>
 
@@ -21,21 +23,30 @@ A Windows desktop toolbox with four independent modules: public link downloading
 
 应用图标：纯黑圆角底 + 白色 S，由 `tools/make_icon.py` 生成（改参数即可重画）。
 
-## 下载与安装
+## 选择你的使用方式
 
-### 方式一：直接使用打包版本（推荐）
+两种用法共用同一套核心模块（链接下载 / 本地转码 / NCM、QMC 解密），按需要选一个即可：
+
+| 你想要 | 用哪个 | 怎么开始 |
+| --- | --- | --- |
+| 自己点点鼠标、图形界面操作 | **桌面版**（Windows） | 到 [Releases](https://github.com/shadowroommusic/ShadowMusicGrabber/releases/latest) 下载 EXE，双击即用，无需 Python |
+| 让 AI 助手替你处理文件 | **MCP 服务** | 在 AI 客户端配置里加一行 `uvx`（任何装了 Python 的系统，含 macOS / Linux） |
+
+## 使用方式一：桌面版（Windows）
+
+### 直接运行 EXE（推荐）
 
 打开 [Releases](https://github.com/shadowroommusic/ShadowMusicGrabber/releases/latest)，下载与你的系统匹配的文件。资产命名格式为 `ShadowMusicGrabber-<版本>-<平台>-<架构>.<扩展名>`：
 
 | 系统 | 文件 |
 | --- | --- |
-| Windows 64 位 | `ShadowMusicGrabber-1.8.1-windows-x64.exe` |
+| Windows 64 位 | `ShadowMusicGrabber-1.8.2-windows-x64.exe` |
 
 下载后直接运行，无需安装 Python。建议把 FFmpeg 放到 EXE 同目录（或在系统 PATH 中），否则下载/转码功能不可用。
 
 程序内也可以从旧版本升级：打开程序，点右上角 **检查更新**，会自动下载并替换为新版本。
 
-### 方式二：从源码运行
+### 从源码运行
 
 ```powershell
 git clone https://github.com/shadowroommusic/ShadowMusicGrabber.git
@@ -45,6 +56,46 @@ python main.py
 ```
 
 需要 Python 3.10+ 与可用的 FFmpeg，可用 `winget install Gyan.FFmpeg` 安装。程序会自动查找 PATH、程序目录、PyInstaller 临时目录和常见 WinGet 路径中的 `ffmpeg` / `ffprobe`。
+
+## 使用方式二：接入 AI Agent（MCP 服务）
+
+如果你在用 Claude Desktop、Cursor、Shadow 这类支持 MCP 的 AI 客户端，可以让它直接调用本工具的下载 / 转码 / 解密能力：不用打开界面，AI 自己处理文件。
+
+仓库内置的 MCP 服务（`mcp_server.py`）不依赖任何第三方 MCP SDK，直接复用与桌面版完全相同的核心模块，走 stdio 传输，**任何装了 Python 的系统都能跑**（Windows / macOS / Linux）。
+
+用 `uvx` 接入（无需克隆仓库、无需手动装依赖，客户端配置里加一段即可）：
+
+```json
+{
+  "mcpServers": {
+    "shadow-musicgrabber": {
+      "command": "uvx",
+      "args": [
+        "--from", "git+https://github.com/shadowroommusic/ShadowMusicGrabber",
+        "shadow-musicgrabber-mcp"
+      ]
+    }
+  }
+}
+```
+
+- **Claude Desktop**：写进 `claude_desktop_config.json` 的 `mcpServers`。
+- **Cursor / 其他客户端**：同样填 `command` + `args` 即可。
+- 也可以克隆仓库后直接运行 `python mcp_server.py`（同样是 stdio 服务）。
+
+提供的工具：
+
+| 工具 | 作用 |
+| --- | --- |
+| `probe_audio` | 读取本地音频的时长、码率、采样率与标签 |
+| `decrypt_audio` | 解密单个 NCM / QQ 音乐文件，可顺带转码 |
+| `decrypt_many` | 批量解密（支持目录递归） |
+| `convert_audio` | 本地转码为 FLAC / WAV / MP3 |
+| `probe_url` | 只解析链接信息（标题、时长），不下载 |
+| `download_audio` | 从公开链接下载音频 |
+| `get_capabilities` | 查询版本、ffmpeg 状态与支持的格式 |
+
+解密与转码全部在本地完成；转码及部分下载格式需要系统能找到 ffmpeg（与桌面版要求相同）。
 
 ## 界面语言 / Language
 
@@ -60,10 +111,11 @@ python main.py
 - 发现新版本时询问是否下载；确认后自动下载并替换当前 EXE，然后重启程序。
 - 只挑选与当前系统和架构匹配的资产，不会误装其他平台的包。
 - 优先走 GitHub API；**API 被限流（未登录每小时 60 次）或不可用时自动退回网页方式**读取最新版本。
-- 下载后校验文件大小，不一致则拒绝安装；替换由「等待退出 → 覆盖 → 重启」的批处理脚本完成。
+- 下载后校验文件大小，不一致则拒绝安装。
+- 替换由后台脚本（VBScript，隐藏运行）完成：等待程序退出 → 覆盖 → 重启，带超时保护，不会弹出窗口、也不会卡住。
 - 从源码运行时不会替换文件，只提供下载页入口。
 
-## 模块与使用方法
+## 功能与使用方法
 
 ### 1. 链接下载
 
@@ -96,42 +148,6 @@ python main.py
 - **凭据自检**：下载前可点此按钮实时校验 Apple cookies 与订阅状态、Beatport 账号密码是否可用，结果写入日志并弹窗提示。
 
 > Beatport 下载依赖第三方命令行工具 `beatportdl.exe`。出于体积与再分发考虑，仓库不包含该文件；需要该功能时请自行获取并放入仓库的 `bin\` 目录（打包脚本会自动把它并入 EXE）。缺少它时其他模块不受影响。
-
-### 5. MCP 服务（供 AI Agent 调用）
-
-仓库内置一个 MCP 服务（`mcp_server.py`），把解密、转码、下载、探测能力直接暴露给 Claude Desktop / Cursor / Shadow 等 AI 客户端，不用打开图形界面。它不依赖任何第三方 MCP SDK，直接复用同一套核心模块。
-
-用 `uvx` 直接运行（无需克隆仓库、无需手动装依赖）：
-
-```json
-{
-  "mcpServers": {
-    "shadow-musicgrabber": {
-      "command": "uvx",
-      "args": [
-        "--from", "git+https://github.com/shadowroommusic/ShadowMusicGrabber",
-        "shadow-musicgrabber-mcp"
-      ]
-    }
-  }
-}
-```
-
-也可以从本地源码运行：`python mcp_server.py`（同样使用 stdin/stdout 的 stdio 传输）。
-
-提供的工具：
-
-| 工具 | 作用 |
-| --- | --- |
-| `probe_audio` | 读取本地音频的时长、码率、采样率与标签 |
-| `decrypt_audio` | 解密单个 NCM / QQ 音乐文件，可顺带转码 |
-| `decrypt_many` | 批量解密（支持目录递归） |
-| `convert_audio` | 本地转码为 FLAC / WAV / MP3 |
-| `probe_url` | 只解析链接信息（标题、时长），不下载 |
-| `download_audio` | 从公开链接下载音频 |
-| `get_capabilities` | 查询版本、ffmpeg 状态与支持的格式 |
-
-解密与转码全部在本地完成；转码及部分下载格式需要系统能找到 ffmpeg（与图形版要求相同）。
 
 ## 自行构建
 
