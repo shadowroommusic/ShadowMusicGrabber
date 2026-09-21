@@ -45,6 +45,7 @@ _EN = {
     "转码": "Convert",
     "完成": "Done",
     "失败": "Failed",
+    "总进度": "Total progress",
     "排队中": "Queued",
     "解析中…": "Resolving…",
     "转码中…": "Converting…",
@@ -107,6 +108,30 @@ _EN = {
     "添加文件…": "Add files…",
     "开始转码": "Start convert",
     "清空列表": "Clear list",
+    # 视频转音频页
+    "视频转音频": "Video to Audio",
+    "视频转音频 · 从链接或本地视频提取音轨": "Video to Audio · Extract audio from links or local videos",
+    "链接支持抖音、TikTok、哔哩哔哩、YouTube 等公开页面；本地文件支持 MP4、MKV、MOV、AVI、WEBM、FLV 等常见视频容器。步骤：粘贴链接或添加视频文件 → 选输出格式与目录 → 点“从链接提取”或“开始转换”。请只处理你拥有或已获授权的内容。":
+        "Links: Douyin, TikTok, Bilibili, YouTube and other public pages. Local files: MP4, MKV, MOV, "
+        "AVI, WEBM, FLV and other common video containers. Steps: paste links or add video files "
+        "→ choose a format and output folder → click “Extract from links” or “Start converting”. "
+        "Only process content you own or are authorised to use.",
+    "视频链接（每行一个）:": "Video links (one per line):",
+    "从链接提取": "Extract from links",
+    "添加视频文件…": "Add video files…",
+    "开始转换": "Start converting",
+    "· 可直接拖入视频文件": "· Drop video files here",
+    "· 请用“添加视频文件”按钮选择": "· Use the “Add video files” button",
+    "任务队列": "Task queue",
+    "选择输出目录": "Choose the output folder",
+    "选择视频或音频文件": "Choose video or audio files",
+    "视频 / 音频": "Video / Audio",
+    "所有文件": "All files",
+    "拖入的内容里没有可转换的文件": "Nothing convertible was dropped.",
+    "请先粘贴至少一个有效的视频链接": "Paste at least one valid video link first.",
+    "请先添加要转换的视频文件": "Add the video files to convert first.",
+    "处理中…": "Working…",
+    "视频转音频队列": "Video-to-audio queue",
     "转码队列": "Convert queue",
     "选择音频文件": "Select audio files",
     "音频文件": "Audio files",

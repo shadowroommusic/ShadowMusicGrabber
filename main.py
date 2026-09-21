@@ -28,7 +28,7 @@ import qmc_decrypt
 import updater
 
 APP_NAME = "Shadow MusicGrabber"
-APP_VERSION = "1.9.1"
+APP_VERSION = "1.10.0"
 
 # 界面语言：先读已保存的设置，否则按系统语言；控件在构造时由 i18n 统一翻译。
 i18n.install()
@@ -140,6 +140,10 @@ class App(ctk.CTk):
         self.default_out_dir = os.path.join(os.path.expanduser("~"), "Music", "ShadowMusicGrabber")
         self.tasks: list[downloader.DownloadTask] = []
         self.task_rows: list[TaskRow] = []
+        # id(task) -> 行对象: 几百个任务时, 逐条线性查找会成为卡顿来源。
+        self.task_row_map: dict[int, TaskRow] = {}
+        self.cv_row_map: dict[int, TaskRow] = {}
+        self.ncm_row_map: dict[int, TaskRow] = {}
         self.ui_queue: queue.Queue = queue.Queue()
         self._running_jobs: set[str] = set()
         self._job_remaining: dict[str, int] = {}
@@ -322,11 +326,13 @@ class App(ctk.CTk):
         tab_cv = self.tabs.add("本地转码")
         tab_ncm = self.tabs.add("解密")
         tab_am = self.tabs.add("Apple/Beatport")
+        tab_va = self.tabs.add("视频转音频")
 
         self._build_download_tab(tab_dl)
         self._build_convert_tab(tab_cv)
         self._build_ncm_tab(tab_ncm)
         self._build_premium_tab(tab_am)
+        self._build_video_tab(tab_va)
 
         # 日志区(全局,所有标签页共用可见)
         log_frame = ctk.CTkFrame(
@@ -480,11 +486,284 @@ class App(ctk.CTk):
 
         self.cv_tasks: list[converter.ConvertTask] = []
         self.cv_rows: list[TaskRow] = []
+        total_row = ctk.CTkFrame(parent, fg_color="transparent")
+        total_row.pack(fill="x", padx=10, pady=(0, 4))
+        ctk.CTkLabel(
+            total_row, text=i18n.tr("总进度"), anchor="w", text_color=MUTED,
+            font=ctk.CTkFont(size=12),
+        ).pack(side="left")
+        self.cv_progress_label = ctk.CTkLabel(
+            total_row, text="0/0 · 0%", anchor="e", text_color=MUTED,
+            font=ctk.CTkFont(size=12),
+        )
+        self.cv_progress_label.pack(side="right")
         self.cv_progress_bar = ctk.CTkProgressBar(
             parent, height=10, fg_color="#303035", progress_color=ACCENT
         )
         self.cv_progress_bar.pack(fill="x", padx=10, pady=(0, 10))
         self.cv_progress_bar.set(0)
+        try:  # 固定滚动步长, 减少拖动滚动条时的大量重绘
+            self.cv_container._parent_canvas.configure(yscrollincrement=20)
+        except Exception:
+            pass
+
+    # ---------- 视频转音频 ----------
+    def _build_video_tab(self, parent):
+        """从公开视频链接或本地视频文件提取音频。"""
+        self._guide(
+            parent,
+            "视频转音频 · 从链接或本地视频提取音轨",
+            "链接支持抖音、TikTok、哔哩哔哩、YouTube 等公开页面；本地文件支持 MP4、MKV、MOV、"
+            "AVI、WEBM、FLV 等常见视频容器。步骤：粘贴链接或添加视频文件 → 选输出格式与目录 "
+            "→ 点“从链接提取”或“开始转换”。请只处理你拥有或已获授权的内容。",
+        )
+
+        row = ctk.CTkFrame(parent, fg_color="transparent")
+        row.pack(fill="x", padx=10, pady=(6, 0))
+        ctk.CTkLabel(row, text="视频链接（每行一个）:", anchor="w").pack(fill="x")
+        self.va_textbox = ctk.CTkTextbox(
+            row, height=66, fg_color="#0f0f10", border_color=BORDER,
+            border_width=1, text_color=TEXT,
+        )
+        self.va_textbox.pack(fill="x", pady=(4, 0))
+
+        row2 = ctk.CTkFrame(parent, fg_color="transparent")
+        row2.pack(fill="x", padx=10, pady=6)
+        ctk.CTkLabel(row2, text="输出格式:").pack(side="left")
+        self.va_fmt_var = ctk.StringVar(value="mp3")
+        ctk.CTkOptionMenu(
+            row2, values=["mp3", "wav", "flac"], variable=self.va_fmt_var, width=110,
+            fg_color=BUTTON, button_color=BUTTON, button_hover_color=BUTTON_HOVER,
+            dropdown_fg_color=PANEL_ALT, dropdown_hover_color=BUTTON_HOVER,
+            text_color=TEXT,
+        ).pack(side="left", padx=6)
+        ctk.CTkLabel(row2, text="输出目录:").pack(side="left", padx=(16, 0))
+        self.va_out_var = ctk.StringVar(value=self.default_out_dir)
+        ctk.CTkEntry(
+            row2, textvariable=self.va_out_var,
+            fg_color="#0f0f10", border_color=BORDER, text_color=TEXT,
+        ).pack(side="left", fill="x", expand=True, padx=6)
+        self._button(row2, "浏览…", self._pick_va_out, width=78).pack(side="left")
+        self._button(
+            row2, "打开目录",
+            lambda: self._open_output_dir(self.va_out_var.get(), "视频转音频"),
+            width=92,
+        ).pack(side="left", padx=(6, 0))
+
+        btn = ctk.CTkFrame(parent, fg_color="transparent")
+        btn.pack(fill="x", padx=10, pady=6)
+        self._button(
+            btn, "从链接提取", self._start_va_links, primary=True, width=130
+        ).pack(side="left")
+        self._button(btn, "添加视频文件…", self._pick_va_files, width=150).pack(
+            side="left", padx=8
+        )
+        self._button(btn, "开始转换", self._start_va_files, width=110).pack(side="left")
+        self._button(btn, "清空列表", self._clear_va_list, width=100).pack(
+            side="left", padx=8
+        )
+
+        list_frame = ctk.CTkFrame(
+            parent, corner_radius=6, fg_color=PANEL,
+            border_width=1, border_color=BORDER,
+        )
+        list_frame.pack(fill="both", expand=True, padx=10, pady=6)
+        head = ctk.CTkFrame(list_frame, fg_color="transparent")
+        head.pack(fill="x", padx=8, pady=(6, 0))
+        ctk.CTkLabel(head, text="任务队列", anchor="w").pack(side="left")
+        self.va_drop_hint = ctk.CTkLabel(
+            head, text="· 可直接拖入视频文件", anchor="w", text_color=MUTED,
+            font=ctk.CTkFont(size=12),
+        )
+        self.va_drop_hint.pack(side="left", padx=(8, 0))
+        self.va_container = ctk.CTkScrollableFrame(list_frame, fg_color="#0f0f10")
+        self.va_container.pack(fill="both", expand=True, padx=6, pady=6)
+
+        self.va_tasks: list = []
+        self.va_rows: list[TaskRow] = []
+        self.va_row_map: dict[int, TaskRow] = {}
+        total_row = ctk.CTkFrame(parent, fg_color="transparent")
+        total_row.pack(fill="x", padx=10, pady=(0, 4))
+        ctk.CTkLabel(
+            total_row, text=i18n.tr("总进度"), anchor="w", text_color=MUTED,
+            font=ctk.CTkFont(size=12),
+        ).pack(side="left")
+        self.va_progress_label = ctk.CTkLabel(
+            total_row, text="0/0 · 0%", anchor="e", text_color=MUTED,
+            font=ctk.CTkFont(size=12),
+        )
+        self.va_progress_label.pack(side="right")
+        self.va_progress_bar = ctk.CTkProgressBar(
+            parent, height=10, fg_color="#303035", progress_color=ACCENT
+        )
+        self.va_progress_bar.pack(fill="x", padx=10, pady=(0, 10))
+        self.va_progress_bar.set(0)
+        try:
+            self.va_container._parent_canvas.configure(yscrollincrement=20)
+        except Exception:
+            pass
+
+        if dragdrop.enable_drop(
+            self.va_container,
+            self._on_va_drop,
+            exts=set(converter.SUPPORTED_INPUT_EXT),
+        ):
+            self.va_drop_enabled = True
+        else:
+            self.va_drop_enabled = False
+            self.va_drop_hint.configure(text="· 请用“添加视频文件”按钮选择")
+
+    def _pick_va_out(self):
+        path = filedialog.askdirectory(title="选择输出目录")
+        if path:
+            self.va_out_var.set(path)
+
+    def _pick_va_files(self):
+        files = filedialog.askopenfilenames(
+            title="选择视频或音频文件",
+            filetypes=[
+                ("视频 / 音频", "*.mp4 *.mkv *.mov *.avi *.webm *.flv *.m4v *.wmv *.ts *.mpg *.mpeg *.3gp"),
+                ("所有文件", "*.*"),
+            ],
+        )
+        if files:
+            self._va_add_files(files)
+
+    def _on_va_drop(self, paths: list):
+        files = [p for p in paths if os.path.isfile(p)]
+        if not files:
+            self._log("拖入的内容里没有可转换的文件")
+            return
+        self._va_add_files(files)
+
+    def _va_add_files(self, paths) -> int:
+        added = 0
+        for raw in paths:
+            f = os.path.abspath(os.fspath(raw))
+            if not converter.is_supported(f):
+                messagebox.showwarning("提示", f"不支持该文件类型: {f}")
+                continue
+            if any(getattr(t, "src", "") == f for t in self.va_tasks):
+                continue
+            fmt = self.va_fmt_var.get()
+            out_dir = self.va_out_var.get().strip() or self.default_out_dir
+            dst = converter.build_output_path(f, out_dir, fmt)
+            task = converter.ConvertTask(src=f, dst=dst, fmt=fmt)
+            self.va_tasks.append(task)
+            row = TaskRow(self.va_container, task)
+            row.title_lbl.configure(text=os.path.basename(f), width=400)
+            row.status_lbl.configure(text="排队中")
+            self.va_rows.append(row)
+            self.va_row_map[id(task)] = row
+            added += 1
+        if added:
+            self._log(f"已添加 {added} 个待转换文件")
+            if getattr(self, "va_drop_enabled", False):
+                dragdrop.enable_drop(
+                    self.va_container,
+                    self._on_va_drop,
+                    exts=set(converter.SUPPORTED_INPUT_EXT),
+                )
+        return added
+
+    def _start_va_links(self):
+        raw = self.va_textbox.get("1.0", "end").strip()
+        urls = [u.strip() for u in raw.splitlines() if u.strip()]
+        urls = [u for u in urls if downloader.is_valid_url(u)]
+        if not urls:
+            messagebox.showwarning("提示", "请先粘贴至少一个有效的视频链接")
+            return
+        if not self._begin_job("video", len(urls)):
+            return
+        out_dir = self._ensure_output_dir(self.va_out_var.get(), "视频转音频")
+        if not out_dir:
+            self._running_jobs.discard("video")
+            self._job_remaining.pop("video", None)
+            return
+        kind = {
+            "mp3": downloader.FormatKind.MP3,
+            "wav": downloader.FormatKind.WAV,
+            "flac": downloader.FormatKind.FLAC,
+        }.get(self.va_fmt_var.get(), downloader.FormatKind.MP3)
+        tasks = []
+        for url in urls:
+            task = downloader.DownloadTask(url=url, out_dir=out_dir, fmt=kind, title=url)
+            self.va_tasks.append(task)
+            row = TaskRow(self.va_container, task)
+            row.title_lbl.configure(text=url, width=400)
+            self.va_rows.append(row)
+            self.va_row_map[id(task)] = row
+            tasks.append(task)
+        self.va_textbox.delete("1.0", "end")
+        self.va_progress_bar.set(0)
+        self.va_progress_label.configure(text="0%")
+        threading.Thread(target=self._va_worker, args=(tasks,), daemon=True).start()
+
+    def _start_va_files(self):
+        pending = [
+            t for t in self.va_tasks
+            if isinstance(t, converter.ConvertTask) and t.status != "完成"
+        ]
+        if not pending:
+            messagebox.showwarning("提示", "请先添加要转换的视频文件")
+            return
+        if not self._begin_job("video", len(pending)):
+            return
+        self.va_progress_bar.set(0)
+        self.va_progress_label.configure(text="0%")
+        threading.Thread(target=self._va_worker, args=(pending,), daemon=True).start()
+
+    def _va_worker(self, tasks: list):
+        total = len(tasks)
+        for i, task in enumerate(tasks):
+            task.status = "处理中…"
+            self.ui_queue.put(("va_refresh", task))
+            try:
+                if isinstance(task, downloader.DownloadTask):
+                    def on_dl_progress(p, speed, eta):
+                        task.update_progress(p, speed, eta)
+                        if self._progress_update_allowed(task):
+                            self.ui_queue.put(("va_progress", task))
+
+                    done_path = downloader.download_url(
+                        task.url, task.out_dir, task.fmt,
+                        on_progress=on_dl_progress,
+                        ffmpeg_location=self.ffmpeg,
+                    )
+                    task.file_path = done_path
+                else:
+                    def on_cv_progress(p):
+                        task.set_progress(p)
+                        if self._progress_update_allowed(task):
+                            self.ui_queue.put(("va_progress", task))
+
+                    done_path = converter.convert_file(
+                        task.src, task.dst, task.fmt,
+                        on_progress=on_cv_progress, ffmpeg=self.ffmpeg,
+                    )
+                    task.dst = done_path
+                task.status = "完成"
+                task.set_progress(100.0)
+                self.ui_queue.put(("va_refresh", task))
+                self.ui_queue.put(("log", f"✓ 已提取音频: {os.path.basename(done_path)}"))
+            except Exception as e:
+                task.status = "失败"
+                task.error = str(e)
+                self.ui_queue.put(("va_refresh", task))
+                self.ui_queue.put(("log", f"✗ 提取失败: {e}"))
+            self.ui_queue.put(("va_total", (i + 1, total)))
+            self._end_job("video")
+
+    def _clear_va_list(self):
+        if not self._require_idle("video", "视频转音频队列"):
+            return
+        self.va_tasks.clear()
+        for row in self.va_rows:
+            row.frame.destroy()
+        self.va_rows.clear()
+        self.va_row_map.clear()
+        self.va_progress_bar.set(0)
+        self.va_progress_label.configure(text="0%")
 
     # ---------- NCM 解密逻辑 ----------
     def _build_ncm_tab(self, parent):
@@ -565,11 +844,26 @@ class App(ctk.CTk):
         # 解密队列混合 NcmTask 与 QmcTask(两者接口一致)
         self.ncm_tasks: list = []
         self.ncm_rows: list[TaskRow] = []
+        total_row = ctk.CTkFrame(parent, fg_color="transparent")
+        total_row.pack(fill="x", padx=10, pady=(0, 4))
+        ctk.CTkLabel(
+            total_row, text=i18n.tr("总进度"), anchor="w", text_color=MUTED,
+            font=ctk.CTkFont(size=12),
+        ).pack(side="left")
+        self.ncm_progress_label = ctk.CTkLabel(
+            total_row, text="0/0 · 0%", anchor="e", text_color=MUTED,
+            font=ctk.CTkFont(size=12),
+        )
+        self.ncm_progress_label.pack(side="right")
         self.ncm_progress_bar = ctk.CTkProgressBar(
             parent, height=10, fg_color="#303035", progress_color=ACCENT
         )
         self.ncm_progress_bar.pack(fill="x", padx=10, pady=(0, 10))
         self.ncm_progress_bar.set(0)
+        try:  # 固定滚动步长, 减少拖动滚动条时的大量重绘
+            self.ncm_container._parent_canvas.configure(yscrollincrement=20)
+        except Exception:
+            pass
 
     def _pick_ncm_out(self):
         if not self._require_idle("ncm", "解密"):
@@ -614,6 +908,7 @@ class App(ctk.CTk):
     def _enqueue_decrypt_files(self, paths) -> int:
         """把一批路径加入解密队列(按钮选择与拖放共用),返回新增数量。"""
         added = 0
+        pending: list = []
         for raw in paths:
             f = os.path.abspath(os.fspath(raw))
             ext = os.path.splitext(f)[1].lower()
@@ -628,19 +923,12 @@ class App(ctk.CTk):
                 continue
             task.dst = self._decrypt_output_path(task, self.ncm_out_var.get())
             self.ncm_tasks.append(task)
-            row = TaskRow(self.ncm_container, task)
-            row.title_lbl.configure(text=os.path.basename(f), width=400)
-            self.ncm_rows.append(row)
+            pending.append(task)
             added += 1
         if added:
+            # 几百个文件时一次性建行会卡住主线程, 改成分批创建。
+            self._create_ncm_rows_in_batches(pending)
             self._log(f"已添加 {added} 个加密文件")
-            if getattr(self, "ncm_drop_enabled", False):
-                # 新加入的任务行会挡住拖放(Tk 拖放不向父级冒泡), 重新扫描注册一次。
-                dragdrop.enable_drop(
-                    self.ncm_container,
-                    self._on_decrypt_drop,
-                    exts={".ncm"} | set(qmc_decrypt.QMC_EXTS),
-                )
         return added
 
     def _clear_ncm_list(self):
@@ -650,7 +938,9 @@ class App(ctk.CTk):
         for row in self.ncm_rows:
             row.frame.destroy()
         self.ncm_rows.clear()
+        self.ncm_row_map.clear()
         self.ncm_progress_bar.set(0)
+        self.ncm_progress_label.configure(text="0%")
 
     def _start_ncm_decrypt(self):
         if not self.ncm_tasks:
@@ -756,7 +1046,7 @@ class App(ctk.CTk):
                 task.error = str(e)
                 self.ui_queue.put(("ncm_refresh", task))
                 self.ui_queue.put(("log", f"✗ 解密失败: {task.src} -> {e}"))
-            self.ui_queue.put(("ncm_total", (i + 1) / total))
+            self.ui_queue.put(("ncm_total", (i + 1, total)))
             self._end_job("ncm")
 
     # ---------- Apple Music / Beatport 下载 ----------
@@ -1134,6 +1424,7 @@ class App(ctk.CTk):
                 self.tasks.append(task)
                 row = TaskRow(self.task_container, task)
                 self.task_rows.append(row)
+                self.task_row_map[id(task)] = row
                 threading.Thread(target=self._download_worker, args=(task,), daemon=True).start()
         except Exception:
             self._running_jobs.discard("download")
@@ -1158,6 +1449,7 @@ class App(ctk.CTk):
         for row in self.task_rows:
             row.frame.destroy()
         self.task_rows.clear()
+        self.task_row_map.clear()
 
     def _reset_task_for_run(self, task):
         task.status = "排队中"
@@ -1234,6 +1526,7 @@ class App(ctk.CTk):
         row.title_lbl.configure(text=os.path.basename(task.src), width=400)
         row.status_lbl.configure(text="排队中")
         self.cv_rows.append(row)
+        self.cv_row_map[id(task)] = row
 
     def _clear_convert_list(self):
         if not self._require_idle("convert", "转码队列"):
@@ -1242,7 +1535,9 @@ class App(ctk.CTk):
         for row in self.cv_rows:
             row.frame.destroy()
         self.cv_rows.clear()
+        self.cv_row_map.clear()
         self.cv_progress_bar.set(0)
+        self.cv_progress_label.configure(text="0%")
 
     def _start_convert(self):
         if not self.cv_tasks:
@@ -1304,7 +1599,7 @@ class App(ctk.CTk):
                 task.error = str(e)
                 self.ui_queue.put(("cv_refresh", task))
                 self.ui_queue.put(("log", f"✗ 转码失败: {task.src} -> {e}"))
-            self.ui_queue.put(("cv_total", (i + 1) / total))
+            self.ui_queue.put(("cv_total", (i + 1, total)))
             self._end_job("convert")
 
     # ---------- 窗口图标 ----------
@@ -1413,6 +1708,48 @@ class App(ctk.CTk):
         self.destroy()
 
     # ---------- UI 队列 ----------
+    def _row_for(self, row_map: dict, task, action: str) -> None:
+        """按 id(task) O(1) 取行; 几百个任务时避免每次消息都线性遍历。"""
+        row = row_map.get(id(task))
+        if row is None:
+            return
+        if action == "refresh":
+            row.refresh()
+        else:
+            row.progress.set(task.progress / 100.0)
+
+    def _set_total_progress(self, bar, label, payload) -> None:
+        """更新总进度条与百分比文字; payload 兼容 (done, total) 与 0~1 比例。"""
+        if isinstance(payload, tuple) and len(payload) == 2:
+            done, total = payload
+            ratio = (done / total) if total else 0.0
+            text = f"{done}/{total} · {ratio * 100:.0f}%"
+        else:
+            ratio = float(payload or 0.0)
+            text = f"{ratio * 100:.0f}%"
+        bar.set(min(max(ratio, 0.0), 1.0))
+        if label is not None:
+            label.configure(text=text)
+
+    def _create_ncm_rows_in_batches(self, tasks: list, batch: int = 40) -> None:
+        """分批创建任务行: 一次几百个控件会把主线程卡住。"""
+        chunk, rest = tasks[:batch], tasks[batch:]
+        for task in chunk:
+            row = TaskRow(self.ncm_container, task)
+            row.title_lbl.configure(text=os.path.basename(task.src), width=400)
+            self.ncm_rows.append(row)
+            self.ncm_row_map[id(task)] = row
+        if rest:
+            self.after(1, lambda: self._create_ncm_rows_in_batches(rest, batch))
+            return
+        if getattr(self, "ncm_drop_enabled", False):
+            # 新行会挡住拖放(Tk 拖放不向父级冒泡), 全部建好后重新注册一次。
+            dragdrop.enable_drop(
+                self.ncm_container,
+                self._on_decrypt_drop,
+                exts={".ncm"} | set(qmc_decrypt.QMC_EXTS),
+            )
+
     def _drain_ui_queue(self):
         # Keep a busy batch from starving Tk's event loop. Workers may still
         # enqueue while we render; the next scheduled drain will catch up.
@@ -1426,33 +1763,33 @@ class App(ctk.CTk):
                 if kind == "log":
                     self._log(msg[1])
                 elif kind == "refresh":
-                    for row in self.task_rows:
-                        if row.task is msg[1]:
-                            row.refresh()
+                    self._row_for(self.task_row_map, msg[1], "refresh")
                 elif kind == "progress":
-                    for row in self.task_rows:
-                        if row.task is msg[1]:
-                            row.progress.set(msg[1].progress / 100.0)
+                    self._row_for(self.task_row_map, msg[1], "progress")
                 elif kind == "cv_refresh":
-                    for row in self.cv_rows:
-                        if row.task is msg[1]:
-                            row.refresh()
+                    self._row_for(self.cv_row_map, msg[1], "refresh")
                 elif kind == "cv_progress":
-                    for row in self.cv_rows:
-                        if row.task is msg[1]:
-                            row.progress.set(msg[1].progress / 100.0)
+                    self._row_for(self.cv_row_map, msg[1], "progress")
                 elif kind == "cv_total":
-                    self.cv_progress_bar.set(msg[1])
+                    self._set_total_progress(
+                        self.cv_progress_bar, self.cv_progress_label, msg[1]
+                    )
                 elif kind == "ncm_refresh":
-                    for row in self.ncm_rows:
-                        if row.task is msg[1]:
-                            row.refresh()
+                    self._row_for(self.ncm_row_map, msg[1], "refresh")
                 elif kind == "ncm_progress":
-                    for row in self.ncm_rows:
-                        if row.task is msg[1]:
-                            row.progress.set(msg[1].progress / 100.0)
+                    self._row_for(self.ncm_row_map, msg[1], "progress")
                 elif kind == "ncm_total":
-                    self.ncm_progress_bar.set(msg[1])
+                    self._set_total_progress(
+                        self.ncm_progress_bar, self.ncm_progress_label, msg[1]
+                    )
+                elif kind == "va_refresh":
+                    self._row_for(self.va_row_map, msg[1], "refresh")
+                elif kind == "va_progress":
+                    self._row_for(self.va_row_map, msg[1], "progress")
+                elif kind == "va_total":
+                    self._set_total_progress(
+                        self.va_progress_bar, self.va_progress_label, msg[1]
+                    )
                 elif kind == "premium_status":
                     service, text = msg[1], msg[2]
                     label = self.premium_status_labels.get(service)

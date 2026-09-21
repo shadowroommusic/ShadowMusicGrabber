@@ -17,7 +17,13 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
-SUPPORTED_INPUT_EXT = {".mp3", ".wav", ".flac", ".m4a", ".aac", ".ogg", ".opus", ".wma", ".aiff", ".aif", ".alac", ".ape", ".mp4", ".webm"}
+# 音频 + 视频容器: 视频会被 ffmpeg 提取音轨后转码(视频转音频页面与本地转码页共用)。
+SUPPORTED_INPUT_EXT = {
+    ".mp3", ".wav", ".flac", ".m4a", ".aac", ".ogg", ".opus", ".wma",
+    ".aiff", ".aif", ".alac", ".ape",
+    ".mp4", ".webm", ".mkv", ".mov", ".avi", ".flv", ".m4v", ".wmv",
+    ".ts", ".mpg", ".mpeg", ".3gp", ".vob", ".rmvb",
+}
 
 
 @dataclass
