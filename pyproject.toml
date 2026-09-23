@@ -15,7 +15,17 @@ dependencies = [
     "yt-dlp>=2024.1.1",
     "mutagen>=1.47.0",
     "pycryptodome>=3.20",
+    "requests>=2.31",
 ]
+
+[project.optional-dependencies]
+# 桌面版才需要（GUI）：core 只留 MCP 运行时需要的三个 + requests
+gui = [
+    "customtkinter>=5.2",
+    "tkinterdnd2>=0.3",
+    "pillow>=10",
+]
+
 
 [project.scripts]
 shadow-musicgrabber-mcp = "mcp_server:main"
