@@ -146,12 +146,16 @@ _EN = {
     "解密 · 网易云 NCM 与 QQ 音乐加密文件": "Decrypt · NetEase NCM & QQ Music encrypted files",
     "支持网易云音乐下载得到的 .ncm 与 QQ 音乐加密文件(.qmc0/.qmc3/.qmcflac/.qmcogg,以及 .mflac/.mgg 等)。"
     "步骤:选择输出目录 → 添加一个或多个加密文件 → 点“开始解密”。程序会在本地还原音频;NCM 会尽力写入歌曲名、歌手、专辑和封面,QQ 音乐文件自带标签会保留。"
-    "不会上传文件;请只处理你拥有或明确获授权的内容。":
+    "不会上传文件;请只处理你拥有或明确获授权的内容。"
+    "若文件使用 QQ 音乐 musicex 新版权保护(2024 起部署),密钥由 QQ 音乐服务器在登录态动态下发,本工具作为离线解密器无法处理,请改用 QQ 音乐客户端播放。":
         "Supports .ncm files downloaded by the NetEase Cloud Music client and QQ Music encrypted files "
         "(.qmc0/.qmc3/.qmcflac/.qmcogg, .mflac/.mgg, etc.). Steps: choose the output folder → add one or "
         "more encrypted files → click “Start decrypt”. Decryption runs locally; NCM files get title, "
         "artist, album and cover written when available, and QQ Music tags are preserved. Nothing is "
-        "uploaded; only process content you own or are authorized to handle.",
+        "uploaded; only process content you own or are authorized to handle. "
+        "Files using QQ Music's musicex protection (deployed since 2024) cannot be decrypted offline "
+        "(the key is issued dynamically by QQ Music servers while signed in); please play them in the "
+        "QQ Music client instead.",
     "添加加密文件…": "Add encrypted files…",
     "开始解密": "Start decrypt",
     "解密队列": "Decrypt queue",
@@ -276,7 +280,12 @@ _EN = {
     "文件太小,不是有效的 QMC 文件": "File is too small to be a valid QMC file",
     "检测到更新的 STag 加密格式: 该格式不内嵌密钥,无法离线解密":
         "Newer STag encryption detected: it embeds no key and cannot be decrypted offline",
-    "检测到 musicex 加密格式: 该格式暂不受支持": "musicex encryption detected: not supported yet",
+    "检测到 musicex 加密格式: 该文件使用 QQ 音乐 2024 起部署的新版权保护,"
+    "解密密钥由 QQ 音乐服务器在登录态动态下发,本工具作为离线解密器无法获取该密钥。"
+    "请改用 QQ 音乐客户端播放该文件(它会在线申请密钥)。":
+        "musicex encryption detected (deployed by QQ Music since 2024): the decryption key is "
+        "issued dynamically by QQ Music servers while signed in, and this offline tool cannot "
+        "obtain it. Please play the file in the QQ Music client (it will request the key online).",
     "无法解析文件尾部密钥(可能是未知的新加密格式)":
         "Cannot parse the embedded key at the end of the file (possibly a newer unsupported format)",
     "尾部密钥为空": "The embedded key is empty",

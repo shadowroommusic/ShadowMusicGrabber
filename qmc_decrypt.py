@@ -390,7 +390,11 @@ def _read_tail(f, size: int) -> tuple[bytes, int]:
     if last4 == b"cex\x00":
         f.seek(size - 8)
         if f.read(4) == b"musi":
-            raise QmcError("检测到 musicex 加密格式: 该格式暂不受支持")
+            raise QmcError(
+                "检测到 musicex 加密格式: 该文件使用 QQ 音乐 2024 起部署的新版权保护,"
+                "解密密钥由 QQ 音乐服务器在登录态动态下发,本工具作为离线解密器无法获取该密钥。"
+                "请改用 QQ 音乐客户端播放该文件(它会在线申请密钥)。"
+            )
 
     (key_len,) = struct.unpack("<I", last4)
     if key_len <= 0 or key_len > size - 4 or key_len > _MAX_TAIL_KEY_BYTES:

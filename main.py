@@ -28,7 +28,7 @@ import qmc_decrypt
 import updater
 
 APP_NAME = "Shadow MusicGrabber"
-APP_VERSION = "1.10.0"
+APP_VERSION = "1.10.1"
 
 # 界面语言：先读已保存的设置，否则按系统语言；控件在构造时由 i18n 统一翻译。
 i18n.install()
@@ -772,7 +772,8 @@ class App(ctk.CTk):
             "解密 · 网易云 NCM 与 QQ 音乐加密文件",
             "支持网易云音乐下载得到的 .ncm 与 QQ 音乐加密文件(.qmc0/.qmc3/.qmcflac/.qmcogg,以及 .mflac/.mgg 等)。"
             "步骤:选择输出目录 → 添加一个或多个加密文件 → 点“开始解密”。程序会在本地还原音频;NCM 会尽力写入歌曲名、歌手、专辑和封面,QQ 音乐文件自带标签会保留。"
-            "不会上传文件;请只处理你拥有或明确获授权的内容。",
+            "不会上传文件;请只处理你拥有或明确获授权的内容。"
+            "若文件使用 QQ 音乐 musicex 新版权保护(2024 起部署),密钥由 QQ 音乐服务器在登录态动态下发,本工具作为离线解密器无法处理,请改用 QQ 音乐客户端播放。",
         )
 
         row = ctk.CTkFrame(parent, fg_color="transparent")
