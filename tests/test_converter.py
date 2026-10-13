@@ -195,5 +195,164 @@ class TestBitDepthPreservation(unittest.TestCase):
         self.assertIn("pcm_s16le", args16)
 
 
+class TestNormalizeSampleRate(unittest.TestCase):
+    """采样率规范化:UI 传入的字符串/None/异常值都应安全回落到"跟随原始"。"""
+
+    def test_valid_rates(self):
+        self.assertEqual(converter.normalize_sample_rate("44100"), 44100)
+        self.assertEqual(converter.normalize_sample_rate(48000), 48000)
+        self.assertEqual(converter.normalize_sample_rate("96000"), 96000)
+        self.assertEqual(converter.normalize_sample_rate("192000"), 192000)
+        self.assertEqual(converter.normalize_sample_rate(" 44100 "), 44100)
+
+    def test_keep_original(self):
+        self.assertIsNone(converter.normalize_sample_rate(None))
+        self.assertIsNone(converter.normalize_sample_rate(""))
+        self.assertIsNone(converter.normalize_sample_rate(0))
+        self.assertIsNone(converter.normalize_sample_rate("0"))
+
+    def test_invalid_values_fall_back_to_none(self):
+        for bad in ("abc", "44.1", None, -44100, "1", 999999, []):
+            self.assertIsNone(
+                converter.normalize_sample_rate(bad), f"异常输入应回落到 None: {bad!r}"
+            )
+
+    def test_choices_are_covered(self):
+        for rate in converter.SAMPLE_RATE_CHOICES:
+            self.assertEqual(converter.normalize_sample_rate(str(rate)), rate)
+
+
+class TestSampleRateConversion(unittest.TestCase):
+    """真实转码:验证输出文件的实际采样率,并确认默认不重采样。"""
+
+    @classmethod
+    def setUpClass(cls):
+        os.makedirs("_ut_tmp", exist_ok=True)
+        cls.ff = converter.find_ffmpeg()
+        cls.ffprobe = converter.find_ffprobe(cls.ff)
+        cls.src = os.path.join("_ut_tmp", "sr_src.wav")
+        import subprocess
+        subprocess.run(
+            [cls.ff, "-hide_banner", "-y", "-f", "lavfi", "-i",
+             "sine=frequency=440:duration=2", "-ar", "44100",
+             "-c:a", "pcm_s16le", cls.src],
+            capture_output=True, timeout=60,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+
+    def _rate(self, path):
+        import json
+        import subprocess
+        out = subprocess.run(
+            [self.ffprobe, "-v", "quiet", "-print_format", "json",
+             "-show_streams", path],
+            capture_output=True, text=True, timeout=20,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        ).stdout
+        for s in json.loads(out).get("streams", []):
+            if s.get("codec_type") == "audio":
+                return int(s.get("sample_rate", 0))
+        return 0
+
+    def test_upsample_to_48k(self):
+        dst = os.path.join("_ut_tmp", "sr48.flac")
+        out = converter.convert_file(
+            self.src, dst, "flac", ffmpeg=self.ff, sample_rate=48000
+        )
+        self.assertEqual(self._rate(out), 48000)
+
+    def test_downsample_to_44k(self):
+        dst = os.path.join("_ut_tmp", "sr44.wav")
+        out = converter.convert_file(
+            self.src, dst, "wav", ffmpeg=self.ff, sample_rate=44100
+        )
+        self.assertEqual(self._rate(out), 44100)
+
+    def test_hires_96k(self):
+        dst = os.path.join("_ut_tmp", "sr96.wav")
+        out = converter.convert_file(
+            self.src, dst, "wav", ffmpeg=self.ff, sample_rate=96000
+        )
+        self.assertEqual(self._rate(out), 96000)
+
+    def test_hires_192k(self):
+        dst = os.path.join("_ut_tmp", "sr192.wav")
+        out = converter.convert_file(
+            self.src, dst, "wav", ffmpeg=self.ff, sample_rate=192000
+        )
+        self.assertEqual(self._rate(out), 192000)
+
+    def test_default_keeps_source_rate(self):
+        """不传 sample_rate 时输出应保持源文件的 44100,不做任何重采样。"""
+        dst = os.path.join("_ut_tmp", "sr_keep.flac")
+        out = converter.convert_file(self.src, dst, "flac", ffmpeg=self.ff)
+        self.assertEqual(self._rate(out), 44100)
+
+
+class TestResampleInPlace(unittest.TestCase):
+    """原地重采样:保持容器与文件名,只改采样率。"""
+
+    @classmethod
+    def setUpClass(cls):
+        os.makedirs("_ut_tmp", exist_ok=True)
+        cls.ff = converter.find_ffmpeg()
+        cls.ffprobe = converter.find_ffprobe(cls.ff)
+        cls.src = os.path.join("_ut_tmp", "rip_src.wav")
+        import subprocess
+        subprocess.run(
+            [cls.ff, "-hide_banner", "-y", "-f", "lavfi", "-i",
+             "sine=frequency=440:duration=2", "-ar", "44100",
+             "-c:a", "pcm_s16le", cls.src],
+            capture_output=True, timeout=60,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+
+    def _rate(self, path):
+        import json
+        import subprocess
+        out = subprocess.run(
+            [self.ffprobe, "-v", "quiet", "-print_format", "json",
+             "-show_streams", path],
+            capture_output=True, text=True, timeout=20,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        ).stdout
+        for s in json.loads(out).get("streams", []):
+            if s.get("codec_type") == "audio":
+                return int(s.get("sample_rate", 0))
+        return 0
+
+    def test_resamples_and_keeps_path(self):
+        import shutil
+        target = os.path.join("_ut_tmp", "rip_target.wav")
+        shutil.copyfile(self.src, target)
+        before_size = os.path.getsize(target)
+        out = converter.resample_in_place(target, 48000, ffmpeg=self.ff)
+        self.assertEqual(out, os.path.abspath(target), "应原地替换,路径不变")
+        self.assertTrue(os.path.exists(target))
+        self.assertEqual(self._rate(target), 48000)
+        self.assertGreater(os.path.getsize(target), 0)
+        self.assertNotEqual(before_size, -1)
+
+    def test_no_temp_files_left_behind(self):
+        import glob
+        import shutil
+        target = os.path.join("_ut_tmp", "rip_clean.wav")
+        shutil.copyfile(self.src, target)
+        converter.resample_in_place(target, 96000, ffmpeg=self.ff)
+        leftovers = [
+            p for p in glob.glob(os.path.join("_ut_tmp", ".rip_clean.wav*"))
+            if os.path.isfile(p)
+        ]
+        self.assertEqual(leftovers, [], f"不应残留临时文件: {leftovers}")
+
+    def test_zero_rate_is_a_noop(self):
+        import shutil
+        target = os.path.join("_ut_tmp", "rip_noop.wav")
+        shutil.copyfile(self.src, target)
+        out = converter.resample_in_place(target, 0, ffmpeg=self.ff)
+        self.assertEqual(out, target)
+        self.assertEqual(self._rate(target), 44100, "0 应表示不重采样")
+
+
 if __name__ == "__main__":
     unittest.main()

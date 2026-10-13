@@ -169,6 +169,26 @@ class ConvertError(Exception):
     pass
 
 
+# 常用输出采样率 (Hz)。None / 0 表示跟随源文件,不重采样。
+SAMPLE_RATE_CHOICES: tuple[int, ...] = (44100, 48000, 96000, 192000)
+
+
+def normalize_sample_rate(value: Optional[object]) -> Optional[int]:
+    """把 UI/配置里的采样率值规范成 ffmpeg 可用的整数 Hz,无效输入返回 None。"""
+    if value is None:
+        return None
+    try:
+        rate = int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    if rate <= 0:
+        return None
+    # 拒绝明显异常的取值,避免用户输入导致 ffmpeg 产出超大文件。
+    if rate < 8000 or rate > 384000:
+        return None
+    return rate
+
+
 def convert_file(
     src: str,
     dst: str,
@@ -176,8 +196,13 @@ def convert_file(
     on_progress: Optional[Callable[[float], None]] = None,
     on_line: Optional[Callable[[str], None]] = None,
     ffmpeg: Optional[str] = None,
+    sample_rate: Optional[int] = None,
 ) -> str:
-    """转码单个文件,返回输出路径。"""
+    """转码单个文件,返回输出路径。
+
+    sample_rate 指定输出采样率 (Hz);None 表示保持源文件采样率不做重采样。
+    重采样只改变采样规格,不会提升原始音质;从有损源重采样也不还原细节。
+    """
     src = os.path.abspath(os.fspath(src))
     dst = os.path.abspath(os.fspath(dst))
     if not os.path.isfile(src):
@@ -186,6 +211,8 @@ def convert_file(
         raise ConvertError(f"不支持的输出格式: {fmt}")
     if os.path.normcase(src) == os.path.normcase(dst):
         raise ConvertError("输出路径不能与源文件相同,请改用其他文件名或目录")
+
+    target_rate = normalize_sample_rate(sample_rate)
 
     ffmpeg_exe = _resolve_executable(ffmpeg) if ffmpeg else find_ffmpeg()
     if not ffmpeg_exe:
@@ -200,6 +227,11 @@ def convert_file(
         codec_args = ["-c:a", "libmp3lame", "-b:a", "320k"]
     else:  # wav - 跟随源位深,避免 24/32-bit 源被降为 16-bit
         codec_args = _wav_codec_args(src, ffmpeg_exe)
+
+    # 采样率:不指定时完全跟随源文件,保证无损链路不引入任何重采样。
+    rate_args: list[str] = []
+    if target_rate:
+        rate_args = ["-ar", str(target_rate)]
 
     # Always render to a sibling temporary file. This prevents a failed ffmpeg
     # invocation from truncating an existing destination and lets us replace it
@@ -228,6 +260,7 @@ def convert_file(
         "0",
         "-vn",
         *codec_args,
+        *rate_args,
         temp_path,
     ]
 
@@ -292,6 +325,122 @@ def convert_file(
     if on_progress:
         on_progress(100.0)
     return dst
+
+
+def _resample_encoder_args(codec_name: str, bitrate: str = "") -> list[str]:
+    """按源编码选择重采样后的目标编码。
+
+    注意:ffmpeg 不允许在流拷贝(-c copy)的同时改变采样率,必须重新编码。
+    这里尽量沿用源编码族,并给它足够高的码率,避免二次有损压缩叠加。
+    """
+    codec = (codec_name or "").lower()
+    if codec == "flac":
+        return ["-c:a", "flac", "-compression_level", "8"]
+    if codec.startswith("pcm") or codec == "wav":
+        return ["-c:a", codec if codec.startswith("pcm") else "pcm_s16le"]
+    if codec == "aac":
+        return ["-c:a", "aac", "-b:a", bitrate or "320k"]
+    if codec in ("libopus", "opus"):
+        return ["-c:a", "libopus", "-b:a", bitrate or "192k"]
+    if codec in ("libmp3lame", "mp3"):
+        return ["-c:a", "libmp3lame", "-b:a", bitrate or "320k"]
+    if codec in ("libvorbis", "vorbis"):
+        return ["-c:a", "libvorbis", "-q:a", "6"]
+    # 未知编码:退回到稳妥的高码率 AAC。
+    return ["-c:a", "aac", "-b:a", bitrate or "320k"]
+
+
+def _probe_audio_codec(path: str, ffmpeg: str) -> tuple[str, str]:
+    """返回 (codec_name, bit_rate);探测失败时返回空串,由调用方走兜底编码器。"""
+    import json
+
+    ffprobe = find_ffprobe(ffmpeg)
+    if not ffprobe:
+        return "", ""
+    try:
+        out = subprocess.run(
+            [ffprobe, "-v", "quiet", "-print_format", "json", "-show_streams", path],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        ).stdout
+        for s in json.loads(out).get("streams", []):
+            if s.get("codec_type") == "audio":
+                return str(s.get("codec_name", "")), str(s.get("bit_rate", "") or "")
+    except Exception:  # noqa: BLE001 - 探测失败不应阻断重采样
+        pass
+    return "", ""
+
+
+def resample_in_place(
+    path: str,
+    sample_rate: int,
+    ffmpeg: Optional[str] = None,
+) -> str:
+    """保持原音频容器与编码族,只把采样率重采样到 sample_rate,原子替换原文件。
+
+    用于"原格式 + 指定采样率"的场景:例如下载到的 m4a/opus 保持原编码,
+    仅重采样。返回最终路径(成功时与入参相同)。
+    """
+    rate = normalize_sample_rate(sample_rate)
+    if not rate:
+        return path
+    path = os.path.abspath(os.fspath(path))
+    if not os.path.isfile(path):
+        raise ConvertError(f"文件不存在: {path}")
+
+    ffmpeg_exe = _resolve_executable(ffmpeg) if ffmpeg else find_ffmpeg()
+    if not ffmpeg_exe:
+        raise ConvertError("未找到 ffmpeg,请先安装并加入 PATH")
+
+    ext = os.path.splitext(path)[1] or ".tmp"
+    dst_dir = os.path.dirname(path) or "."
+    fd, temp_path = tempfile.mkstemp(
+        prefix=f".{os.path.basename(path)}.", suffix=ext, dir=dst_dir
+    )
+    os.close(fd)
+    try:
+        os.remove(temp_path)
+    except OSError:
+        pass
+
+    # 改变采样率必须重新编码:-c copy 流拷贝时 ffmpeg 会拒绝重采样。
+    codec_args = _resample_encoder_args(*_probe_audio_codec(path, ffmpeg_exe))
+    cmd = [
+        ffmpeg_exe, "-hide_banner", "-nostdin", "-y",
+        "-i", path,
+        "-map", "0:a:0",
+        "-map_metadata", "0",
+        "-vn",
+        *codec_args,
+        "-ar", str(rate),
+        temp_path,
+    ]
+    try:
+        proc = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=600,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        if proc.returncode != 0:
+            detail = (proc.stdout or "")[-500:]
+            raise ConvertError(f"重采样失败 (ffmpeg {proc.returncode}): {detail}")
+        if not os.path.isfile(temp_path) or os.path.getsize(temp_path) <= 0:
+            raise ConvertError("重采样后未生成有效输出文件")
+        os.replace(temp_path, path)
+    finally:
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+    return path
 
 
 def _probe_duration(path: str, ffmpeg: str) -> float:

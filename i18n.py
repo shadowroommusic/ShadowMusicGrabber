@@ -96,18 +96,39 @@ _EN = {
     # 本地转码页
     "本地转码 · 处理电脑上的音频文件": "Local convert · files on this PC",
     "支持 MP3、WAV、FLAC、M4A、AAC、OGG、OPUS、WMA、AIFF、APE 等常见格式。"
-    "步骤:选择目标 FLAC/WAV → 添加一个或多个文件 → 选择输出目录 → 点“开始转码”。"
+    "步骤:选择目标 FLAC/WAV 和采样率 → 添加一个或多个文件 → 选择输出目录 → 点“开始转码”。"
     "转码只改变容器/编码方式;从有损音频转成 FLAC/WAV 不会提升原始音质。":
         "Supports MP3, WAV, FLAC, M4A, AAC, OGG, OPUS, WMA, AIFF, APE and more. Steps: choose target "
-        "FLAC/WAV → add one or more files → choose the output folder → click “Start convert”. Converting "
-        "only changes the container/codec; a lossy source converted to FLAC/WAV keeps the original quality.",
+        "FLAC/WAV and sample rate → add one or more files → choose the output folder → click “Start convert”. "
+        "Converting only changes the container/codec; a lossy source converted to FLAC/WAV keeps the original quality.",
     "目标格式:": "Target format:",
+    "采样率:": "Sample rate:",
     "输出目录:": "Output folder:",
-    "FLAC 适合归档;WAV 文件较大但兼容性广。":
-        "FLAC is good for archiving; WAV is larger but widely compatible.",
+    "保持原始": "Keep original",
+    "44100 Hz (CD)": "44100 Hz (CD)",
+    "48000 Hz (视频)": "48000 Hz (Video)",
+    "96000 Hz (Hi-Res)": "96000 Hz (Hi-Res)",
+    "192000 Hz (Hi-Res+)": "192000 Hz (Hi-Res+)",
+    "采样率: 保持原始 — 输出跟随每个源文件自身的采样率,不重采样。":
+        "Sample rate: keep original — each output follows its own source rate; no resampling.",
+    "采样率: 44100 Hz — CD 经典规格,兼容性最好。":
+        "Sample rate: 44100 Hz — the classic CD spec, best compatibility.",
+    "采样率: 48000 Hz — 视频项目标配,与 YouTube/B 站等主流平台一致。":
+        "Sample rate: 48000 Hz — standard for video work, matches YouTube/Bilibili.",
+    "采样率: 96000 Hz — Hi-Res 规格,文件明显变大,不会提升原始音质。":
+        "Sample rate: 96000 Hz — Hi-Res spec; files get much larger and quality does not improve.",
+    "采样率: 192000 Hz — 极高规格,文件非常大,仅在源素材本身够高时才有意义。":
+        "Sample rate: 192000 Hz — very high spec; files are huge and it only matters when the source is already that detailed.",
+    "FLAC 适合归档;WAV 文件较大但兼容性广。重采样只统一规格,不会提升音质。":
+        "FLAC is good for archiving; WAV is larger but widely compatible. Resampling only standardises the spec, "
+        "it does not improve quality.",
     "添加文件…": "Add files…",
     "开始转码": "Start convert",
     "清空列表": "Clear list",
+    # 采样率相关的运行期错误(来自 converter / downloader)
+    "重采样失败 (ffmpeg ": "Resampling failed (ffmpeg ",
+    "重采样后未生成有效输出文件": "Resampling produced no valid output file",
+    "重采样到 ": "Resampling to ",
     # 视频转音频页
     "视频转音频": "Video to Audio",
     "视频转音频 · 从链接或本地视频提取音轨": "Video to Audio · Extract audio from links or local videos",
@@ -369,6 +390,11 @@ _PREFIXES = (
     ("解密后的密钥长度异常: ", "Unexpected key length after decryption: "),
     ("文件不存在: ", "File not found: "),
     ("剩余 ", "ETA "),
+    ("转码批次开始 · ", "Convert batch · "),
+    ("提取批次开始 · ", "Extract batch · "),
+    ("解密批次开始 · ", "Decrypt batch · "),
+    (" 个文件 · ", " files · "),
+    (" 个任务 · ", " tasks · "),
 )
 
 # 正则兜底：处理中文出现在中间、或需要重排语序的文案
@@ -399,6 +425,7 @@ _PATTERNS = (
     (re.compile(r"^下载中 (\d+)%$"), "Downloading {0}%"),
     (re.compile(r"^提示:仅处理(.+)$"), "Note: only process{0}"),
     # 组合文案：中文出现在中间，需要整体重排
+    (re.compile(r"^已加入 (.+) 个任务 · 采样率 (.+)$"), "Queued {0} task(s) · sample rate {1}"),
     (re.compile(r"^已加入 (.+) 个任务$"), "Queued {0} task(s)"),
     (re.compile(r"^已添加 (.+) 个加密文件$"), "Added {0} encrypted file(s)"),
     (re.compile(r"^已添加 (.+) 个转码文件$"), "Added {0} file(s) to convert"),

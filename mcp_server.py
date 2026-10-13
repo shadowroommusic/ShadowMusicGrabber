@@ -33,7 +33,7 @@ import ncm_decrypt  # noqa: E402
 import qmc_decrypt  # noqa: E402
 
 SERVER_NAME = "shadow-musicgrabber"
-SERVER_VERSION = "1.10.0"  # keep in sync with pyproject.toml / main.py APP_VERSION
+SERVER_VERSION = "1.11.0"  # keep in sync with pyproject.toml / main.py APP_VERSION
 PROTOCOL_VERSION = "2024-11-05"
 
 _ENCRYPTED_EXTS = {".ncm"} | set(qmc_decrypt.QMC_EXTS)
@@ -80,6 +80,41 @@ def _check_format(raw: Any, allowed: tuple[str, ...], label: str) -> str:
     if value not in allowed:
         raise ToolError(f"Unsupported {label} {value!r}; use one of {list(allowed)}")
     return value
+
+
+def _check_sample_rate(raw: Any) -> Optional[int]:
+    """解析可选的 sample_rate 参数。
+
+    缺省/None/0 表示保持源采样率;其余必须是允许的常用采样率,
+    以免调用方传入离谱数值产出超大文件。
+    """
+    if raw is None:
+        return None
+    rate = converter.normalize_sample_rate(raw)
+    if rate is None:
+        if raw in (0, "0") or (isinstance(raw, str) and raw.strip() == ""):
+            return None
+        raise ToolError(
+            f"Unsupported sample_rate {raw!r}; omit it to keep the source rate, "
+            f"or use one of {list(converter.SAMPLE_RATE_CHOICES)}"
+        )
+    if rate not in converter.SAMPLE_RATE_CHOICES:
+        raise ToolError(
+            f"Unsupported sample_rate {raw!r}; omit it to keep the source rate, "
+            f"or use one of {list(converter.SAMPLE_RATE_CHOICES)}"
+        )
+    return rate
+
+
+# 各工具共用的 sample_rate 参数说明。
+_SAMPLE_RATE_PROPERTY = {
+    "type": "integer",
+    "enum": list(converter.SAMPLE_RATE_CHOICES),
+    "description": (
+        "Optional output sample rate in Hz. Omit it to keep each source file's own "
+        "sample rate. Resampling only standardises the spec and never improves quality."
+    ),
+}
 
 
 def _unique_path(directory: str, stem: str, ext: str, reserved: set[str]) -> str:
@@ -189,7 +224,10 @@ def tool_probe_audio(args: dict) -> dict:
     return info
 
 
-def _decrypt_one(src: str, out_dir: str, fmt: str, reserved: set[str]) -> dict:
+def _decrypt_one(
+    src: str, out_dir: str, fmt: str, reserved: set[str],
+    sample_rate: Optional[int] = None,
+) -> dict:
     ext = os.path.splitext(src)[1].lower()
     if ext == ".ncm":
         target = ncm_decrypt.make_output_path(src, out_dir, reserved)
@@ -213,17 +251,28 @@ def _decrypt_one(src: str, out_dir: str, fmt: str, reserved: set[str]) -> dict:
     if artist:
         result["artist"] = artist
 
-    if fmt != "original":
+    if fmt != "original" or sample_rate:
+        if sample_rate and fmt == "original":
+            # 保持解密得到的容器与编码,只重采样。
+            converter.resample_in_place(raw, sample_rate, ffmpeg=converter.find_ffmpeg())
+            result["output"] = raw
+            result["format"] = "original"
+            result["sample_rate"] = sample_rate
+            return result
         stem = os.path.splitext(os.path.basename(raw))[0]
         target = _unique_path(out_dir, stem, f".{fmt}", reserved)
-        converted = converter.convert_file(raw, target, fmt, ffmpeg=converter.find_ffmpeg())
+        converted = converter.convert_file(
+            raw, target, fmt, ffmpeg=converter.find_ffmpeg(), sample_rate=sample_rate
+        )
         result["output"] = converted
         result["format"] = fmt
+        result["sample_rate"] = sample_rate or "source"
         if os.path.normcase(converted) != os.path.normcase(raw):
             result["decrypted_kept"] = raw
     else:
         result["output"] = raw
         result["format"] = "original"
+        result["sample_rate"] = "source"
     return result
 
 
@@ -232,12 +281,14 @@ def tool_decrypt_audio(args: dict) -> dict:
     if os.path.isdir(src):
         raise ToolError("`path` must be a file; use decrypt_many for directories.")
     fmt = _check_format(args.get("output_format"), _OUTPUT_FORMATS, "output_format")
+    sample_rate = _check_sample_rate(args.get("sample_rate"))
     out_dir = _resolve_out_dir(args.get("output_dir")) if args.get("output_dir") else os.path.dirname(src)
-    return _decrypt_one(src, out_dir, fmt, set())
+    return _decrypt_one(src, out_dir, fmt, set(), sample_rate=sample_rate)
 
 
 def tool_decrypt_many(args: dict) -> dict:
     fmt = _check_format(args.get("output_format"), _OUTPUT_FORMATS, "output_format")
+    sample_rate = _check_sample_rate(args.get("sample_rate"))
     out_dir = _resolve_out_dir(args.get("output_dir")) if args.get("output_dir") else None
     sources = _collect_encrypted(args.get("paths"))
     reserved: set[str] = set()
@@ -248,7 +299,7 @@ def tool_decrypt_many(args: dict) -> dict:
         last_error: Optional[Exception] = None
         for _attempt in range(2):
             try:
-                items.append(_decrypt_one(src, target_dir, fmt, reserved))
+                items.append(_decrypt_one(src, target_dir, fmt, reserved, sample_rate=sample_rate))
                 last_error = None
                 break
             except Exception as exc:
@@ -271,12 +322,17 @@ def tool_convert_audio(args: dict) -> dict:
     if os.path.isdir(src):
         raise ToolError("`path` must be a file.")
     fmt = _check_format(args.get("output_format"), ("flac", "wav", "mp3"), "output_format")
+    sample_rate = _check_sample_rate(args.get("sample_rate"))
     out_dir = _resolve_out_dir(args.get("output_dir")) if args.get("output_dir") else os.path.dirname(src)
     stem = os.path.splitext(os.path.basename(src))[0]
     reserved: set[str] = {os.path.normcase(os.path.abspath(src))}
     target = _unique_path(out_dir, stem, f".{fmt}", reserved)
-    produced = converter.convert_file(src, target, fmt, ffmpeg=converter.find_ffmpeg())
-    return {"source": src, "output": produced, "format": fmt}
+    produced = converter.convert_file(
+        src, target, fmt, ffmpeg=converter.find_ffmpeg(), sample_rate=sample_rate
+    )
+    result: dict[str, Any] = {"source": src, "output": produced, "format": fmt}
+    result["sample_rate"] = sample_rate or "source"
+    return result
 
 
 def _ytdlp_probe(url: str) -> dict:
@@ -313,6 +369,7 @@ def tool_download_audio(args: dict) -> dict:
     if not isinstance(url, str) or not downloader.is_valid_url(url):
         raise ToolError(f"Invalid or unsupported URL: {url!r}")
     fmt = _check_format(args.get("output_format"), _OUTPUT_FORMATS, "output_format")
+    sample_rate = _check_sample_rate(args.get("sample_rate"))
     out_dir = _resolve_out_dir(args.get("output_dir"))
     produced = downloader.download_url(
         url,
@@ -320,8 +377,15 @@ def tool_download_audio(args: dict) -> dict:
         fmt=_DOWNLOAD_FORMATS[fmt],
         ffmpeg_location=converter.find_ffmpeg(),
         allow_playlist=bool(args.get("allow_playlist", False)),
+        sample_rate=sample_rate,
     )
-    return {"url": url, "output": produced, "format": fmt, "output_dir": out_dir}
+    return {
+        "url": url,
+        "output": produced,
+        "format": fmt,
+        "output_dir": out_dir,
+        "sample_rate": sample_rate or "source",
+    }
 
 
 # --------------------------------------------------------------------------
@@ -382,6 +446,7 @@ _TOOL_SPECS: list[tuple[dict, Callable[[dict], dict]]] = [
                         "enum": list(_OUTPUT_FORMATS),
                         "description": "original (keep decrypted format), flac, wav or mp3. Default: original.",
                     },
+                    "sample_rate": dict(_SAMPLE_RATE_PROPERTY),
                 },
                 "required": ["path"],
                 "additionalProperties": False,
@@ -414,6 +479,7 @@ _TOOL_SPECS: list[tuple[dict, Callable[[dict], dict]]] = [
                         "enum": list(_OUTPUT_FORMATS),
                         "description": "original, flac, wav or mp3. Default: original.",
                     },
+                    "sample_rate": dict(_SAMPLE_RATE_PROPERTY),
                 },
                 "required": ["paths"],
                 "additionalProperties": False,
@@ -426,6 +492,7 @@ _TOOL_SPECS: list[tuple[dict, Callable[[dict], dict]]] = [
             "name": "convert_audio",
             "description": (
                 "Convert a local audio file to flac, wav or mp3 with ffmpeg. "
+                "Optionally resample to a standard rate (44100/48000/96000/192000 Hz). "
                 "Never overwrites the source file."
             ),
             "inputSchema": {
@@ -437,6 +504,7 @@ _TOOL_SPECS: list[tuple[dict, Callable[[dict], dict]]] = [
                         "type": "string",
                         "description": "Directory for the output file. Defaults to the source directory.",
                     },
+                    "sample_rate": dict(_SAMPLE_RATE_PROPERTY),
                 },
                 "required": ["path", "output_format"],
                 "additionalProperties": False,
@@ -486,6 +554,7 @@ _TOOL_SPECS: list[tuple[dict, Callable[[dict], dict]]] = [
                         "type": "boolean",
                         "description": "Allow playlists (default false: only the single track).",
                     },
+                    "sample_rate": dict(_SAMPLE_RATE_PROPERTY),
                 },
                 "required": ["url"],
                 "additionalProperties": False,

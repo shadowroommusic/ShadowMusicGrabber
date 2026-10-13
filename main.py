@@ -15,6 +15,7 @@ import threading
 import time
 import tkinter as tk
 from tkinter import filedialog, messagebox
+from typing import Optional
 
 import customtkinter as ctk
 
@@ -28,7 +29,7 @@ import qmc_decrypt
 import updater
 
 APP_NAME = "Shadow MusicGrabber"
-APP_VERSION = "1.10.1"
+APP_VERSION = "1.11.0"
 
 # 界面语言：先读已保存的设置，否则按系统语言；控件在构造时由 i18n 统一翻译。
 i18n.install()
@@ -62,6 +63,16 @@ FORMAT_ORDER = [
     downloader.FormatKind.MP3,
     downloader.FormatKind.ORIGINAL,
 ]
+
+# 采样率选项。"" 表示跟随源文件,不触发重采样。四个页面共用同一份定义。
+CV_SAMPLE_RATE_CHOICES: tuple[str, ...] = ("", "44100", "48000", "96000", "192000")
+CV_SAMPLE_RATE_LABELS = {
+    "": "保持原始",
+    "44100": "44100 Hz (CD)",
+    "48000": "48000 Hz (视频)",
+    "96000": "96000 Hz (Hi-Res)",
+    "192000": "192000 Hz (Hi-Res+)",
+}
 
 # 解密页的输出格式：值用于扩展名/转码，显示名交给 i18n 翻译。
 DECRYPT_FORMAT_LABELS = {
@@ -182,6 +193,48 @@ class App(ctk.CTk):
         if fmt == downloader.FormatKind.WAV:
             return "WAV: 无压缩容器,文件会较大;从有损源转换不会提升音质。"
         return "FLAC: 无损容器,适合归档;从有损源转换不会提升音质。"
+
+    def _on_cv_rate_change(self, label: str):
+        """把下拉框显示文案映射回内部采样率值(下拉项可能已被翻译成英文)。"""
+        text = i18n.untr(label)
+        for value, zh_label in CV_SAMPLE_RATE_LABELS.items():
+            if zh_label == text:
+                self.cv_rate_var.set(value)
+                if hasattr(self, "cv_rate_hint"):
+                    self.cv_rate_hint.configure(text=self._cv_rate_hint(value))
+                return
+
+    def _on_dl_rate_change(self, label: str):
+        """链接下载页的采样率下拉框。"""
+        text = i18n.untr(label)
+        for value, zh_label in CV_SAMPLE_RATE_LABELS.items():
+            if zh_label == text:
+                self.dl_rate_var.set(value)
+                if hasattr(self, "dl_rate_hint"):
+                    self.dl_rate_hint.configure(text=self._cv_rate_hint(value))
+                return
+
+    def _dl_sample_rate(self) -> Optional[int]:
+        return converter.normalize_sample_rate(self.dl_rate_var.get())
+
+    def _cv_sample_rate(self) -> Optional[int]:
+        """返回当前选择的采样率(None 表示跟随源文件)。"""
+        return converter.normalize_sample_rate(self.cv_rate_var.get())
+
+    def _rate_desc(self, sample_rate: Optional[int]) -> str:
+        """把采样率拼成日志里的一句话(保持原始时用英文,避免译文里夹中文)。"""
+        return f"{sample_rate} Hz" if sample_rate else "source rate"
+
+    def _cv_rate_hint(self, value: str) -> str:
+        if not value:
+            return "采样率: 保持原始 — 输出跟随每个源文件自身的采样率,不重采样。"
+        if value == "48000":
+            return "采样率: 48000 Hz — 视频项目标配,与 YouTube/B 站等主流平台一致。"
+        if value == "96000":
+            return "采样率: 96000 Hz — Hi-Res 规格,文件明显变大,不会提升原始音质。"
+        if value == "192000":
+            return "采样率: 192000 Hz — 极高规格,文件非常大,仅在源素材本身够高时才有意义。"
+        return "采样率: 44100 Hz — CD 经典规格,兼容性最好。"
 
     def _button(
         self,
@@ -411,7 +464,27 @@ class App(ctk.CTk):
             anchor="w",
             text_color=MUTED,
         )
-        self.fmt_hint.pack(fill="x", padx=10, pady=(0, 8))
+        self.fmt_hint.pack(fill="x", padx=10, pady=(0, 6))
+
+        rate_row = ctk.CTkFrame(input_frame, fg_color="transparent")
+        rate_row.pack(fill="x", padx=10, pady=(0, 8))
+        ctk.CTkLabel(rate_row, text="采样率:").pack(side="left")
+        self.dl_rate_var = ctk.StringVar(value="")
+        self.dl_rate_label_var = ctk.StringVar(value=CV_SAMPLE_RATE_LABELS[""])
+        ctk.CTkOptionMenu(
+            rate_row,
+            values=[CV_SAMPLE_RATE_LABELS[c] for c in CV_SAMPLE_RATE_CHOICES],
+            variable=self.dl_rate_label_var,
+            command=self._on_dl_rate_change,
+            width=170,
+            fg_color=BUTTON, button_color=BUTTON,
+            button_hover_color=BUTTON_HOVER, dropdown_fg_color=PANEL_ALT,
+            dropdown_hover_color=BUTTON_HOVER, text_color=TEXT,
+        ).pack(side="left", padx=6)
+        self.dl_rate_hint = ctk.CTkLabel(
+            rate_row, text=self._cv_rate_hint(""), anchor="w", text_color=MUTED,
+        )
+        self.dl_rate_hint.pack(side="left", padx=(12, 0))
 
         btn_frame = ctk.CTkFrame(parent, fg_color="transparent")
         btn_frame.pack(fill="x", padx=10, pady=6)
@@ -436,7 +509,7 @@ class App(ctk.CTk):
             parent,
             "本地转码 · 处理电脑上的音频文件",
             "支持 MP3、WAV、FLAC、M4A、AAC、OGG、OPUS、WMA、AIFF、APE 等常见格式。"
-            "步骤:选择目标 FLAC/WAV → 添加一个或多个文件 → 选择输出目录 → 点“开始转码”。"
+            "步骤:选择目标 FLAC/WAV 和采样率 → 添加一个或多个文件 → 选择输出目录 → 点“开始转码”。"
             "转码只改变容器/编码方式;从有损音频转成 FLAC/WAV 不会提升原始音质。",
         )
 
@@ -451,6 +524,21 @@ class App(ctk.CTk):
             dropdown_hover_color=BUTTON_HOVER, text_color=TEXT,
         ).pack(side="left", padx=6)
 
+        ctk.CTkLabel(row, text="采样率:").pack(side="left", padx=(16, 0))
+        self.cv_rate_var = ctk.StringVar(value="")
+        self.cv_rate_label_var = ctk.StringVar(value=CV_SAMPLE_RATE_LABELS[""])
+        self.cv_rate_menu = ctk.CTkOptionMenu(
+            row,
+            values=[CV_SAMPLE_RATE_LABELS[c] for c in CV_SAMPLE_RATE_CHOICES],
+            variable=self.cv_rate_label_var,
+            command=self._on_cv_rate_change,
+            width=170,
+            fg_color=BUTTON, button_color=BUTTON,
+            button_hover_color=BUTTON_HOVER, dropdown_fg_color=PANEL_ALT,
+            dropdown_hover_color=BUTTON_HOVER, text_color=TEXT,
+        )
+        self.cv_rate_menu.pack(side="left", padx=6)
+
         ctk.CTkLabel(row, text="输出目录:").pack(side="left", padx=(16, 0))
         self.cv_out_var = ctk.StringVar(value=self.default_out_dir)
         ctk.CTkEntry(
@@ -464,9 +552,14 @@ class App(ctk.CTk):
             lambda: self._open_output_dir(self.cv_out_var.get(), "转码"),
             width=92,
         ).pack(side="left", padx=(6, 0))
-        ctk.CTkLabel(
-            parent, text="FLAC 适合归档;WAV 文件较大但兼容性广。", anchor="w",
+        self.cv_rate_hint = ctk.CTkLabel(
+            parent, text=self._cv_rate_hint(""), anchor="w",
             text_color=MUTED,
+        )
+        self.cv_rate_hint.pack(fill="x", padx=16, pady=(0, 2))
+        ctk.CTkLabel(
+            parent, text="FLAC 适合归档;WAV 文件较大但兼容性广。重采样只统一规格,不会提升音质。",
+            anchor="w", text_color=MUTED,
         ).pack(fill="x", padx=16, pady=(0, 4))
 
         btn_frame = ctk.CTkFrame(parent, fg_color="transparent")
@@ -537,6 +630,19 @@ class App(ctk.CTk):
             dropdown_fg_color=PANEL_ALT, dropdown_hover_color=BUTTON_HOVER,
             text_color=TEXT,
         ).pack(side="left", padx=6)
+        ctk.CTkLabel(row2, text="采样率:").pack(side="left", padx=(16, 0))
+        self.va_rate_var = ctk.StringVar(value="")
+        self.va_rate_label_var = ctk.StringVar(value=CV_SAMPLE_RATE_LABELS[""])
+        ctk.CTkOptionMenu(
+            row2,
+            values=[CV_SAMPLE_RATE_LABELS[c] for c in CV_SAMPLE_RATE_CHOICES],
+            variable=self.va_rate_label_var,
+            command=self._on_va_rate_change,
+            width=170,
+            fg_color=BUTTON, button_color=BUTTON, button_hover_color=BUTTON_HOVER,
+            dropdown_fg_color=PANEL_ALT, dropdown_hover_color=BUTTON_HOVER,
+            text_color=TEXT,
+        ).pack(side="left", padx=6)
         ctk.CTkLabel(row2, text="输出目录:").pack(side="left", padx=(16, 0))
         self.va_out_var = ctk.StringVar(value=self.default_out_dir)
         ctk.CTkEntry(
@@ -549,6 +655,12 @@ class App(ctk.CTk):
             lambda: self._open_output_dir(self.va_out_var.get(), "视频转音频"),
             width=92,
         ).pack(side="left", padx=(6, 0))
+
+        self.va_rate_hint = ctk.CTkLabel(
+            parent, text=self._cv_rate_hint(""), anchor="w",
+            text_color=MUTED,
+        )
+        self.va_rate_hint.pack(fill="x", padx=16, pady=(0, 4))
 
         btn = ctk.CTkFrame(parent, fg_color="transparent")
         btn.pack(fill="x", padx=10, pady=6)
@@ -612,6 +724,19 @@ class App(ctk.CTk):
         else:
             self.va_drop_enabled = False
             self.va_drop_hint.configure(text="· 请用“添加视频文件”按钮选择")
+
+    def _on_va_rate_change(self, label: str):
+        """视频页采样率下拉框:显示文案可能已被翻译,先用 untr 还原。"""
+        text = i18n.untr(label)
+        for value, zh_label in CV_SAMPLE_RATE_LABELS.items():
+            if zh_label == text:
+                self.va_rate_var.set(value)
+                if hasattr(self, "va_rate_hint"):
+                    self.va_rate_hint.configure(text=self._cv_rate_hint(value))
+                return
+
+    def _va_sample_rate(self) -> Optional[int]:
+        return converter.normalize_sample_rate(self.va_rate_var.get())
 
     def _pick_va_out(self):
         path = filedialog.askdirectory(title="选择输出目录")
@@ -715,6 +840,10 @@ class App(ctk.CTk):
 
     def _va_worker(self, tasks: list):
         total = len(tasks)
+        # 批次开始时锁定采样率,避免中途改动下拉框影响同一批任务。
+        sample_rate = self._va_sample_rate()
+        rate_desc = self._rate_desc(sample_rate)
+        self.ui_queue.put(("log", f"提取批次开始 · {len(tasks)} 个任务 · {rate_desc}"))
         for i, task in enumerate(tasks):
             task.status = "处理中…"
             self.ui_queue.put(("va_refresh", task))
@@ -740,6 +869,7 @@ class App(ctk.CTk):
                     done_path = converter.convert_file(
                         task.src, task.dst, task.fmt,
                         on_progress=on_cv_progress, ffmpeg=self.ffmpeg,
+                        sample_rate=sample_rate,
                     )
                     task.dst = done_path
                 task.status = "完成"
@@ -808,6 +938,25 @@ class App(ctk.CTk):
             lambda: self._open_output_dir(self.ncm_out_var.get(), "解密"),
             width=92,
         ).pack(side="left", padx=(6, 0))
+
+        rate_row = ctk.CTkFrame(parent, fg_color="transparent")
+        rate_row.pack(fill="x", padx=10, pady=(0, 4))
+        ctk.CTkLabel(rate_row, text="采样率:").pack(side="left")
+        self.ncm_rate_var = ctk.StringVar(value="")
+        self.ncm_rate_label_var = ctk.StringVar(value=CV_SAMPLE_RATE_LABELS[""])
+        ctk.CTkOptionMenu(
+            rate_row, width=170,
+            values=[CV_SAMPLE_RATE_LABELS[c] for c in CV_SAMPLE_RATE_CHOICES],
+            variable=self.ncm_rate_label_var,
+            command=self._on_ncm_rate_change,
+            fg_color=BUTTON, button_color=BUTTON,
+            button_hover_color=BUTTON_HOVER, dropdown_fg_color=PANEL_ALT,
+            dropdown_hover_color=BUTTON_HOVER, text_color=TEXT,
+        ).pack(side="left", padx=6)
+        self.ncm_rate_hint = ctk.CTkLabel(
+            rate_row, text=self._cv_rate_hint(""), anchor="w", text_color=MUTED,
+        )
+        self.ncm_rate_hint.pack(side="left", padx=(12, 0))
 
         btn_frame = ctk.CTkFrame(parent, fg_color="transparent")
         btn_frame.pack(fill="x", padx=10, pady=6)
@@ -900,6 +1049,19 @@ class App(ctk.CTk):
     def _on_decrypt_fmt_change(self, label: str):
         self.decrypt_fmt_var.set(DECRYPT_FORMAT_LABELS.get(i18n.untr(label), "original"))
 
+    def _on_ncm_rate_change(self, label: str):
+        """解密页的采样率下拉框。"""
+        text = i18n.untr(label)
+        for value, zh_label in CV_SAMPLE_RATE_LABELS.items():
+            if zh_label == text:
+                self.ncm_rate_var.set(value)
+                if hasattr(self, "ncm_rate_hint"):
+                    self.ncm_rate_hint.configure(text=self._cv_rate_hint(value))
+                return
+
+    def _ncm_sample_rate(self) -> Optional[int]:
+        return converter.normalize_sample_rate(self.ncm_rate_var.get())
+
     def _decrypt_output_path(self, task, out_dir: str) -> str:
         """本轮解密该任务的目标路径(扩展名由加密格式推定)。"""
         if isinstance(task, ncm_decrypt.NcmTask):
@@ -954,7 +1116,8 @@ class App(ctk.CTk):
         target_fmt = self.decrypt_fmt_var.get() or "original"
         if target_fmt not in DECRYPT_TARGET_FORMATS:
             target_fmt = "original"
-        if target_fmt != "original" and not self.ffmpeg:
+        sample_rate = self._ncm_sample_rate()
+        if (target_fmt != "original" or sample_rate) and not self.ffmpeg:
             messagebox.showerror("错误", "未找到 ffmpeg,无法转码。请先安装 ffmpeg 并加入 PATH。")
             return
         if not self._begin_job("ncm", len(pending)):
@@ -975,20 +1138,31 @@ class App(ctk.CTk):
                     task.dst = ncm_decrypt.make_output_path(task.src, out_dir, reserved)
                 else:
                     task.dst = qmc_decrypt.make_output_path(task.src, out_dir, reserved)
-            threading.Thread(target=self._ncm_worker, args=(pending, target_fmt), daemon=True).start()
+            threading.Thread(
+                target=self._ncm_worker,
+                args=(pending, target_fmt, sample_rate),
+                daemon=True,
+            ).start()
         except Exception:
             self._running_jobs.discard("ncm")
             self._job_remaining.pop("ncm", None)
             raise
 
-    def _transcode_decrypted(self, raw: str, fmt: str, on_progress) -> str:
+    def _transcode_decrypted(self, raw: str, fmt: str, on_progress, sample_rate=None) -> str:
         """把解密结果转成目标格式；已经是指定格式时原样返回。
 
         中间文件只在转码成功后才删除，所以即使转码失败，
         用户仍能在输出目录拿到解密结果。
+
+        sample_rate 指定输出采样率；给了采样率时，即使解密结果已经是目标
+        扩展名也要重采样一遍(例如 .flac 解密结果统一到 48 kHz)。
         """
         current = os.path.splitext(raw)[1].lstrip(".").lower()
         if current == fmt:
+            # 已经是目标格式:仅在指定了采样率时做原地重采样,不改文件名。
+            if not sample_rate:
+                return raw
+            converter.resample_in_place(raw, sample_rate, ffmpeg=self.ffmpeg)
             return raw
         out_dir = os.path.dirname(os.path.abspath(raw)) or "."
         final = converter.build_output_path(raw, out_dir, fmt)
@@ -997,6 +1171,7 @@ class App(ctk.CTk):
                 raw, final, fmt,
                 on_progress=lambda p: on_progress(50.0 + p * 0.5),
                 ffmpeg=self.ffmpeg,
+                sample_rate=sample_rate,
             )
         except Exception:
             if os.path.exists(final):
@@ -1011,8 +1186,11 @@ class App(ctk.CTk):
             pass
         return final
 
-    def _ncm_worker(self, tasks: list, target_fmt: str = "original"):
+    def _ncm_worker(self, tasks: list, target_fmt: str = "original", sample_rate=None):
         total = len(tasks)
+        # 批次开始时锁定采样率,避免中途改动下拉框影响同一批任务。
+        rate_desc = self._rate_desc(sample_rate)
+        self.ui_queue.put(("log", f"解密批次开始 · {len(tasks)} 个文件 · {rate_desc}"))
         for i, task in enumerate(tasks):
             task.status = "解密中…"
             self.ui_queue.put(("ncm_refresh", task))
@@ -1023,7 +1201,8 @@ class App(ctk.CTk):
                     self.ui_queue.put(("ncm_progress", task))
 
             try:
-                turning = target_fmt != "original"
+                # 需要重采样时,解密阶段只占进度条前 50%。
+                turning = target_fmt != "original" or bool(sample_rate)
                 step = (lambda p: on_progress(p * 0.5)) if turning else on_progress
                 if isinstance(task, ncm_decrypt.NcmTask):
                     raw, meta = ncm_decrypt.decrypt_file(
@@ -1035,7 +1214,9 @@ class App(ctk.CTk):
                 if turning:
                     task.status = "转码中…"
                     self.ui_queue.put(("ncm_refresh", task))
-                    dst = self._transcode_decrypted(raw, target_fmt, on_progress)
+                    dst = self._transcode_decrypted(
+                        raw, target_fmt, on_progress, sample_rate=sample_rate
+                    )
                     task.dst = dst
                 task.status = "完成"
                 task.set_progress(100.0)
@@ -1418,9 +1599,12 @@ class App(ctk.CTk):
             self._job_remaining.pop("download", None)
             return
         fmt = self._selected_download_format()
+        sample_rate = self._dl_sample_rate()
+        rate_desc = self._rate_desc(sample_rate)
         try:
             for url in urls:
                 task = downloader.DownloadTask(url=url, out_dir=out_dir, fmt=fmt, title=url)
+                task.sample_rate = sample_rate
                 self._reset_task_for_run(task)
                 self.tasks.append(task)
                 row = TaskRow(self.task_container, task)
@@ -1432,7 +1616,7 @@ class App(ctk.CTk):
             self._job_remaining.pop("download", None)
             raise
         self.url_textbox.delete("1.0", "end")
-        self._log(f"已加入 {len(urls)} 个任务")
+        self._log(f"已加入 {len(urls)} 个任务 · 采样率 {rate_desc}")
 
     def _urls_from_entry(self) -> tuple[list[str], list[str]]:
         raw = self.url_textbox.get("1.0", "end").strip()
@@ -1464,6 +1648,9 @@ class App(ctk.CTk):
             task.file_path = ""
 
     def _download_worker(self, task: downloader.DownloadTask):
+        # 任务入队时已锁定采样率,避免多个任务共享下拉框状态时被后续改动影响。
+        sample_rate = getattr(task, "sample_rate", None)
+
         def on_status(s: str):
             task.status = s
             self.ui_queue.put(("refresh", task))
@@ -1480,6 +1667,7 @@ class App(ctk.CTk):
                 task.url, task.out_dir, task.fmt,
                 on_status=on_status, on_progress=on_progress,
                 ffmpeg_location=self.ffmpeg,
+                sample_rate=sample_rate,
             )
             task.status = "完成"
             task.file_path = fp
@@ -1576,6 +1764,10 @@ class App(ctk.CTk):
 
     def _convert_worker(self, tasks: list[converter.ConvertTask]):
         total = len(tasks)
+        # 批次开始时锁定采样率,避免用户在转码中途改动下拉框影响同一批任务。
+        sample_rate = self._cv_sample_rate()
+        rate_desc = self._rate_desc(sample_rate)
+        self.ui_queue.put(("log", f"转码批次开始 · {len(tasks)} 个文件 · {rate_desc}"))
         for i, task in enumerate(tasks):
             task.status = "转码中…"
             self.ui_queue.put(("cv_refresh", task))
@@ -1590,6 +1782,7 @@ class App(ctk.CTk):
                     task.src, task.dst, task.fmt,
                     on_progress=on_progress,
                     ffmpeg=self.ffmpeg,
+                    sample_rate=sample_rate,
                 )
                 task.status = "完成"
                 task.set_progress(100.0)

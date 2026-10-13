@@ -17,6 +17,8 @@ from urllib.parse import urlsplit
 
 import yt_dlp
 
+from converter import normalize_sample_rate
+
 
 class FormatKind(str, Enum):
     """输出格式选择。flac/wav 为无损容器。"""
@@ -89,17 +91,25 @@ def build_ydl_opts(
     task: DownloadTask,
     progress_hook: Callable[[dict], None],
     ffmpeg_location: Optional[str] = None,
+    sample_rate: Optional[int] = None,
 ) -> dict:
-    """构造 yt-dlp 选项。无损策略:优先下载源最高音质,再用 ffmpeg 无损转封装。"""
+    """构造 yt-dlp 选项。无损策略:优先下载源最高音质,再用 ffmpeg 无损转封装。
+
+    sample_rate 指定输出采样率 (Hz);None 表示跟随源文件,不重采样。
+    """
     postprocessors: list[dict] = []
+    postprocessor_args: dict = {}
+    rate = normalize_sample_rate(sample_rate)
     if task.fmt == FormatKind.FLAC:
-        postprocessors.append(
-            {"key": "FFmpegExtractAudio", "preferredcodec": "flac", "preferredquality": "0"}
-        )
+        entry = {"key": "FFmpegExtractAudio", "preferredcodec": "flac", "preferredquality": "0"}
+        if rate:
+            entry["postprocessor_args"] = ["-ar", str(rate)]
+        postprocessors.append(entry)
     elif task.fmt == FormatKind.MP3:
-        postprocessors.append(
-            {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "320"}
-        )
+        entry = {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "320"}
+        if rate:
+            entry["postprocessor_args"] = ["-ar", str(rate)]
+        postprocessors.append(entry)
     # WAV: 不用 yt-dlp 的后处理(它固定转 pcm_s16le 会降位深),
     # 下载原始格式后用 converter 的位深感知转码
 
@@ -144,11 +154,16 @@ def download_url(
     on_progress: Optional[Callable[[float, str, str], None]] = None,
     ffmpeg_location: Optional[str] = None,
     allow_playlist: bool = False,
+    sample_rate: Optional[int] = None,
 ) -> str:
-    """下载单个链接并返回最终文件路径。"""
+    """下载单个链接并返回最终文件路径。
+
+    sample_rate 指定输出采样率 (Hz);None 表示跟随源文件,不重采样。
+    """
     if not is_valid_url(url):
         raise DownloadError(f"无效链接: {url!r}")
 
+    rate = normalize_sample_rate(sample_rate)
     out_dir = os.path.abspath(os.fspath(out_dir))
     os.makedirs(out_dir, exist_ok=True)
     task = DownloadTask(url=url, out_dir=out_dir, fmt=fmt, allow_playlist=allow_playlist)
@@ -175,7 +190,7 @@ def download_url(
             if on_status:
                 on_status("下载完成,转码中…")
 
-    opts = build_ydl_opts(task, hook, ffmpeg_location)
+    opts = build_ydl_opts(task, hook, ffmpeg_location, sample_rate=rate)
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=True)
@@ -194,13 +209,20 @@ def download_url(
             if os.path.abspath(wav_path) != os.path.abspath(final):
                 if on_status:
                     on_status("转码为 WAV…")
-                convert_file(final, wav_path, "wav", ffmpeg=ffmpeg_location)
+                convert_file(final, wav_path, "wav", ffmpeg=ffmpeg_location, sample_rate=rate)
                 try:
                     if os.path.exists(final):
                         os.remove(final)
                 except OSError:
                     pass
                 final = wav_path
+        # 原格式 + 指定采样率:容器不变,只重采样(例如 m4a/opus 保持原样重采样)
+        elif task.fmt == FormatKind.ORIGINAL and rate and final and ffmpeg_location:
+            from converter import resample_in_place
+
+            if on_status:
+                on_status(f"重采样到 {rate} Hz…")
+            final = resample_in_place(final, rate, ffmpeg=ffmpeg_location)
         return final
     except yt_dlp.utils.DownloadError as e:
         raise DownloadError(f"下载失败: {e}") from e

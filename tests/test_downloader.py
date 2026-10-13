@@ -65,6 +65,42 @@ class TestBuildYdlOpts(unittest.TestCase):
         self.assertTrue(opts["noplaylist"])
 
 
+class TestBuildYdlOptsSampleRate(unittest.TestCase):
+    """采样率透传到 yt-dlp 后处理参数。"""
+
+    def _task(self, fmt):
+        return downloader.DownloadTask(url="https://a.com/x", out_dir="D:/tmp", fmt=fmt)
+
+    def test_no_rate_adds_no_postprocessor_args(self):
+        opts = downloader.build_ydl_opts(self._task(downloader.FormatKind.FLAC), lambda d: None)
+        self.assertNotIn("postprocessor_args", opts["postprocessors"][0])
+
+    def test_flac_rate_is_passed_to_postprocessor(self):
+        opts = downloader.build_ydl_opts(
+            self._task(downloader.FormatKind.FLAC), lambda d: None, sample_rate=48000
+        )
+        self.assertEqual(opts["postprocessors"][0]["postprocessor_args"], ["-ar", "48000"])
+
+    def test_mp3_rate_is_passed_to_postprocessor(self):
+        opts = downloader.build_ydl_opts(
+            self._task(downloader.FormatKind.MP3), lambda d: None, sample_rate=96000
+        )
+        self.assertEqual(opts["postprocessors"][0]["postprocessor_args"], ["-ar", "96000"])
+
+    def test_invalid_rate_is_dropped(self):
+        """非法采样率应被忽略,不能把坏值传给 ffmpeg。"""
+        opts = downloader.build_ydl_opts(
+            self._task(downloader.FormatKind.FLAC), lambda d: None, sample_rate="oops"
+        )
+        self.assertNotIn("postprocessor_args", opts["postprocessors"][0])
+
+    def test_wav_ignores_postprocessor_but_still_valid(self):
+        opts = downloader.build_ydl_opts(
+            self._task(downloader.FormatKind.WAV), lambda d: None, sample_rate=48000
+        )
+        self.assertNotIn("postprocessors", opts, "WAV 仍走下载后自行转码的路径")
+
+
 class TestDownloadErrors(unittest.TestCase):
     def test_invalid_url(self):
         with self.assertRaises(downloader.DownloadError):

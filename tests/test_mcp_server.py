@@ -131,6 +131,55 @@ class McpProtocolTests(unittest.TestCase):
         self.assertIn("output_format", text)
 
 
+class SampleRateArgumentTests(unittest.TestCase):
+    """sample_rate 参数：缺省保持原采样率，非法值必须报清晰的 ToolError。"""
+
+    def test_omitted_means_keep_source(self):
+        import mcp_server
+        self.assertIsNone(mcp_server._check_sample_rate(None))
+
+    def test_blank_and_zero_mean_keep_source(self):
+        import mcp_server
+        self.assertIsNone(mcp_server._check_sample_rate(""))
+        self.assertIsNone(mcp_server._check_sample_rate(0))
+        self.assertIsNone(mcp_server._check_sample_rate("0"))
+
+    def test_all_supported_rates_accepted(self):
+        import converter
+        import mcp_server
+        for rate in converter.SAMPLE_RATE_CHOICES:
+            self.assertEqual(mcp_server._check_sample_rate(rate), rate)
+            self.assertEqual(mcp_server._check_sample_rate(str(rate)), rate)
+
+    def test_absurd_rate_is_rejected(self):
+        import mcp_server
+        for bad in (123, "abc", 999999, -44100, []):
+            with self.assertRaises(mcp_server.ToolError, msg=f"应拒绝 {bad!r}"):
+                mcp_server._check_sample_rate(bad)
+
+    def test_tool_rejects_bad_rate_with_helpful_message(self):
+        import mcp_server
+        with self.assertRaises(mcp_server.ToolError) as ctx:
+            mcp_server.tool_convert_audio(
+                {
+                    "path": os.path.join(PROJ, "README.md"),
+                    "output_format": "flac",
+                    "sample_rate": 12345,
+                }
+            )
+        message = str(ctx.exception)
+        self.assertIn("sample_rate", message)
+        self.assertIn("44100", message, "报错应列出可选采样率")
+
+    def test_schema_exposes_sample_rate_on_audio_tools(self):
+        import mcp_server
+        specs = {spec["name"]: spec for spec, _ in mcp_server._TOOL_SPECS}
+        for name in ("convert_audio", "decrypt_audio", "decrypt_many", "download_audio"):
+            props = specs[name]["inputSchema"]["properties"]
+            self.assertIn("sample_rate", props, f"{name} 缺少 sample_rate")
+            self.assertEqual(props["sample_rate"]["type"], "integer")
+
+
 class DecryptRetryTests(unittest.TestCase):
     """批量解密的偶发失败重试(直接测函数, 不依赖真实文件)。"""
 
@@ -139,7 +188,7 @@ class DecryptRetryTests(unittest.TestCase):
 
         calls = []
 
-        def flaky(src, out_dir, fmt, reserved):
+        def flaky(src, out_dir, fmt, reserved, sample_rate=None):
             calls.append(src)
             if len(calls) == 1:
                 raise RuntimeError("transient ffmpeg failure")
