@@ -148,8 +148,20 @@ python main.py
 
 ### 3. NCM / QQ 音乐解密
 
-- **网易云 NCM**：还原客户端下载得到的 `.ncm` 内嵌 FLAC/MP3 音频，并尽力写入歌曲名、歌手、专辑和封面。
+- **网易云 NCM**：还原客户端下载得到的 `.ncm` 内嵌 FLAC/MP3 音频，并写入歌曲名、歌手、专辑艺人、专辑、曲号、碟号、发行日期、流派和封面。
 - **QQ 音乐**：支持旧格式 `.qmc0/.qmc3/.qmcflac/.qmcogg`（整文件静态异或）与新格式 `.mflac/.mflac0/.mflac1/.mgg/.mgg0/.mgg1/.mggl/.mmp4`（尾部内嵌密钥：TEA 保护 + Mask128 / 强化 RC4），自动识别长度前缀与 QTag 两种尾部，并在输出前校验音频头。新版 `STag` / `musicex` 格式不内嵌离线密钥，会给出明确提示。
+- **封面贯穿全流程**：ffmpeg 会把封面当作 attached_pic 视频流，转码时通常会丢弃。程序会在转码前用 mutagen 取出封面、转码后写回，因此 FLAC↔FLAC、FLAC→MP3 以及重采样都不会丢封面（WAV/AIFF 这类无标签容器除外）。
+- **元数据补全**：NCM 会写入标题、歌手、专辑艺人、专辑、曲号、碟号、发行日期、流派和封面。QQ 音乐文件常常只有裸音频，程序会从 `QTag` 尾部提取歌名补写标签（QQ 音乐的新格式不内嵌封面，封面对 QMC 无解）。
+- **声学指纹识别（可选，默认关闭）**：解密产物缺标签时，可在解密页开启「标签缺失时用声学指纹联网识别」，程序会用声学指纹联网补全歌名/歌手/专辑并下载封面，再按上面的规则命名。
+
+  > **需要两个前置条件，缺任一个都会自动跳过、不影响解密：**
+  > 1. **`fpcalc`（Chromaprint）** —— pip 装不了，需从 [acoustid/chromaprint releases](https://github.com/acoustid/chromaprint/releases) 下载 `chromaprint-fpcalc-*-windows-x86_64.zip`，把 `fpcalc.exe` 放到程序的 `bin` 目录或加入 `PATH`（也可设环境变量 `FPCALC`）。放在 `bin\` 里会被 spec 自动打包进 EXE。
+  > 2. **AcoustID API Key** —— 免费，用 MusicBrainz 账号登录 [acoustid.org](https://acoustid.org/) 获取，填在解密页。程序不内置任何 key。
+  >
+  > ⚠️ **覆盖有限**：AcoustID 的数据库挂在 MusicBrainz 上、由社区维护，**对 QQ 音乐独占的中文曲目覆盖很有限，查不到是常态**。需要完整标签建议配合 [MusicBrainz Picard](https://picard.musicbrainz.org/) 或 Mp3tag。
+  > ⚠️ 这是**联网**功能，与本程序「纯本地解密」的原则不同，因此默认关闭、需手动开启。
+
+- **输出命名**：默认按 `歌手 - 歌名.ext` 重命名（解密页可关闭）。取不到歌名时维持源文件名并会在日志里说明原因；重名自动加 `_1`、`_2` 后缀；会过滤 Windows 非法字符与保留设备名。
 - **拖拽添加**：把加密文件或整个文件夹直接拖进队列即可批量添加（文件夹会递归扫描）。
 - **输出格式**：可选“原始格式”（最快、保真度最高）或转成 FLAC / WAV / MP3；转码需要 ffmpeg，转码失败时解密结果仍会保留。
 - 全部在本地完成、不上传任何文件，请仅用于你合法获得的文件。
@@ -176,7 +188,7 @@ pyinstaller --noconfirm --clean ShadowMusicGrabber.spec
 
 生成物为 `dist\ShadowMusicGrabber.exe`。spec 会收集 yt-dlp、customtkinter、gamdl、Crypto、mutagen、tkinterdnd2；`bin\beatportdl.exe` 存在时一并打包。FFmpeg 不复制进 EXE，请确保目标机器可找到它，或把 `ffmpeg.exe` / `ffprobe.exe` 放在 EXE 同目录。
 
-测试覆盖 URL 校验与平台识别、yt-dlp 选项、FFmpeg/ffprobe 定位、24-bit 音频转码、原子输出、NCM 封面段解析与 C 层 XOR 解密、元数据写入、QQ 音乐 QMC 解密（v1/v2 全格式、真实测试向量、尾部/密钥链异常）、Premium 参数校验与凭据自检、更新模块的版本比较/平台资产选择/限流兜底、MCP 服务的协议与工具接口，以及界面文案的翻译覆盖率。
+测试覆盖 URL 校验与平台识别、yt-dlp 选项、FFmpeg/ffprobe 定位、24-bit 音频转码、采样率规范化与真实重采样（44.1k/48k/96k/192k 及保持原始）、**转码与重采样中的封面保留**、原子输出、NCM 封面段解析与 C 层 XOR 解密、扩展元数据（专辑艺人/日期/曲号/碟号/流派）、QTag 歌名提取与标签补写、输出文件名安全处理（非法字符/保留设备名/重名后缀）、QQ 音乐 QMC 解密（v1/v2 全格式、真实测试向量、尾部/密钥链异常）、Premium 参数校验与凭据自检、更新模块的版本比较/平台资产选择/限流兜底、MCP 服务的协议与工具接口，以及界面文案的翻译覆盖率。
 
 ## 目录
 

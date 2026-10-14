@@ -46,6 +46,63 @@ class NcmMeta:
     format: str = ""  # 原始内嵌格式: flac / mp3
     raw_json: dict = field(default_factory=dict)
 
+    @property
+    def album_artist(self) -> str:
+        """专辑艺人。NCM 的 artist 数组在部分歌曲里就是专辑艺人。"""
+        obj = self.raw_json or {}
+        for key in ("albumArtist", "album_artist", "albumartist"):
+            value = obj.get(key)
+            if isinstance(value, (list, tuple)):
+                value = value[0] if value else ""
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return self.artist
+
+    @property
+    def publish_date(self) -> str:
+        """发行日期。NCM 用毫秒时间戳,转成 YYYY-MM-DD。"""
+        obj = self.raw_json or {}
+        for key in ("publishTime", "publishTimeText", "albumPublishTime"):
+            value = obj.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()[:10]
+            if isinstance(value, (int, float)) and value > 0:
+                import datetime
+
+                try:
+                    return datetime.datetime.fromtimestamp(
+                        float(value) / 1000.0
+                    ).strftime("%Y-%m-%d")
+                except (ValueError, OSError, OverflowError):
+                    return ""
+        return ""
+
+    @property
+    def track_number(self) -> str:
+        """音轨号,NCM 用 no 字段(部分文件是字符串)。"""
+        obj = self.raw_json or {}
+        value = obj.get("no", obj.get("trackNumber", ""))
+        text = str(value).strip() if value not in (None, "") else ""
+        return "" if text in ("0", "-1") else text
+
+    @property
+    def disc_number(self) -> str:
+        obj = self.raw_json or {}
+        value = obj.get("discNumber", obj.get("diskNumber", ""))
+        text = str(value).strip() if value not in (None, "") else ""
+        return "" if text in ("0", "-1") else text
+
+    @property
+    def genre(self) -> str:
+        obj = self.raw_json or {}
+        for key in ("genre", "genres", "categoryName"):
+            value = obj.get(key)
+            if isinstance(value, (list, tuple)):
+                value = "/".join(str(v) for v in value if v)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return ""
+
 
 @dataclass
 class NcmTask:
@@ -364,7 +421,7 @@ def detect_audio_format(audio: bytes) -> str:
 
 
 def write_flac_meta(path: str, meta: NcmMeta, cover: bytes, identifier: str = "") -> None:
-    """向 FLAC 写入标题/艺术家/专辑/封面。"""
+    """向 FLAC 写入标题/艺术家/专辑/曲号/日期/流派/封面。"""
     from mutagen.flac import FLAC, Picture
 
     audio = FLAC(path)
@@ -374,6 +431,23 @@ def write_flac_meta(path: str, meta: NcmMeta, cover: bytes, identifier: str = ""
         audio["artist"] = meta.artist
     if meta.album:
         audio["album"] = meta.album
+
+    album_artist = meta.album_artist
+    if album_artist:
+        audio["albumartist"] = album_artist
+    date = meta.publish_date
+    if date:
+        audio["date"] = date
+    track = meta.track_number
+    if track:
+        audio["tracknumber"] = track
+    disc = meta.disc_number
+    if disc:
+        audio["discnumber"] = disc
+    genre = meta.genre
+    if genre:
+        audio["genre"] = genre
+
     if identifier:
         audio["comment"] = identifier
     if cover:
@@ -391,10 +465,14 @@ def decrypt_file(
     on_progress: Optional[Callable[[float], None]] = None,
     on_line: Optional[Callable[[str], None]] = None,
     ffmpeg: Optional[str] = None,
+    rename_by_meta: bool = False,
 ) -> tuple[str, NcmMeta]:
     """解密单个 .ncm 文件,输出 FLAC(若内嵌为 MP3 则用 ffmpeg 转 FLAC)。
 
     返回 (输出路径, 元数据)。
+
+    rename_by_meta=True 时,若能从元数据取到歌名,会把输出重命名为
+    "歌手 - 歌名.flac"。
     """
     if not os.path.exists(src):
         raise NcmError(f"文件不存在: {src}")
@@ -468,7 +546,30 @@ def decrypt_file(
 
     if on_progress:
         on_progress(100.0)
+
+    if rename_by_meta:
+        dst = _rename_by_meta(dst, meta)
     return dst, meta
+
+
+def _rename_by_meta(dst: str, meta: NcmMeta) -> str:
+    """按"歌手 - 歌名"重命名输出文件;信息不足或重名时保持原样。"""
+    from qmc_decrypt import build_track_filename
+
+    target = build_track_filename(
+        meta.artist, meta.music_name, os.path.splitext(dst)[1], os.path.dirname(dst)
+    )
+    if not target:
+        return dst
+    try:
+        if os.path.normcase(os.path.abspath(target)) == os.path.normcase(
+            os.path.abspath(dst)
+        ):
+            return dst
+        os.replace(dst, target)
+        return target
+    except OSError:
+        return dst
 
 
 def _transcode_to_flac(

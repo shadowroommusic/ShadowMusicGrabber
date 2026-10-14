@@ -354,5 +354,208 @@ class TestResampleInPlace(unittest.TestCase):
         self.assertEqual(self._rate(target), 44100, "0 应表示不重采样")
 
 
+class TestBatchNameCollision(unittest.TestCase):
+    """回归:同一批次里不同来源产出同名文件时不得互相覆盖。
+
+    历史 bug: GUI 的「添加文件」在调用 build_output_path 时没传 reserved,
+    导致 A/song.mp3 与 B/song.mp3 都排到 song.flac,后一个任务静默覆盖
+    前一个的结果(真实数据丢失)。
+    """
+
+    def test_same_basename_different_dirs_get_distinct_outputs(self):
+        with tempfile.TemporaryDirectory() as td:
+            out = os.path.join(td, "out")
+            os.makedirs(out)
+            src_a = os.path.join(td, "A", "song.mp3")
+            src_b = os.path.join(td, "B", "song.mp3")
+            for path in (src_a, src_b):
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                open(path, "wb").close()
+
+            reserved: set[str] = set()
+            first = converter.build_output_path(src_a, out, "flac", reserved)
+            second = converter.build_output_path(src_b, out, "flac", reserved)
+            self.assertNotEqual(
+                os.path.normcase(first), os.path.normcase(second),
+                "不同来源的同名文件必须排到不同输出路径",
+            )
+            self.assertTrue(first.endswith("song.flac"))
+            self.assertTrue(second.endswith("song_1.flac"))
+
+    def test_reserved_seeded_from_existing_tasks(self):
+        """GUI 用已有任务的 dst 预填 reserved,新任务必须避开。"""
+        with tempfile.TemporaryDirectory() as td:
+            existing = os.path.join(td, "song.flac")
+            open(existing, "wb").close()
+            reserved = {os.path.normcase(os.path.abspath(existing))}
+            nxt = converter.build_output_path(
+                os.path.join(td, "song.mp3"), td, "flac", reserved
+            )
+            self.assertTrue(nxt.endswith("song_1.flac"))
+            self.assertNotEqual(
+                os.path.normcase(os.path.abspath(nxt)),
+                os.path.normcase(os.path.abspath(existing)),
+            )
+
+    def test_many_colliding_sources_all_unique(self):
+        with tempfile.TemporaryDirectory() as td:
+            out = os.path.join(td, "out")
+            os.makedirs(out)
+            reserved: set[str] = set()
+            names = []
+            for folder in ("A", "B", "C", "D"):
+                src = os.path.join(td, folder, "song.mp3")
+                os.makedirs(os.path.dirname(src), exist_ok=True)
+                names.append(
+                    os.path.basename(
+                        converter.build_output_path(src, out, "flac", reserved)
+                    )
+                )
+            self.assertEqual(len(set(names)), 4, f"输出名应互不相同: {names}")
+
+    def test_without_reserved_conflict_exists(self):
+        """反向证明:不传 reserved 确实会冲突(说明为什么必须传)。"""
+        with tempfile.TemporaryDirectory() as td:
+            src_a = os.path.join(td, "A", "song.mp3")
+            src_b = os.path.join(td, "B", "song.mp3")
+            for path in (src_a, src_b):
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                open(path, "wb").close()
+            first = converter.build_output_path(src_a, td, "flac")
+            second = converter.build_output_path(src_b, td, "flac")
+            self.assertEqual(
+                os.path.normcase(first), os.path.normcase(second),
+                "不传 reserved 时确实冲突,这正是本测试要防的回归",
+            )
+
+
+class TestAtomicWriteProtection(unittest.TestCase):
+    """原子写:转换失败绝不能破坏已有目标文件,也不应泄漏临时文件。"""
+
+    def test_failed_conversion_preserves_destination(self):
+        with tempfile.TemporaryDirectory() as td:
+            bad = os.path.join(td, "bad.mp3")
+            with open(bad, "wb") as f:
+                f.write(b"not audio at all")
+            keep = os.path.join(td, "keep.flac")
+            with open(keep, "wb") as f:
+                f.write(b"ORIGINAL DATA")
+            with self.assertRaises(converter.ConvertError):
+                converter.convert_file(
+                    bad, keep, "flac", ffmpeg=converter.find_ffmpeg()
+                )
+            with open(keep, "rb") as f:
+                self.assertEqual(f.read(), b"ORIGINAL DATA")
+
+    def test_repeated_failures_leave_no_temp_files(self):
+        import glob
+        with tempfile.TemporaryDirectory() as td:
+            bad = os.path.join(td, "x.mp3")
+            with open(bad, "wb") as f:
+                f.write(b"garbage")
+            for i in range(4):
+                try:
+                    converter.convert_file(
+                        bad, os.path.join(td, f"o{i}.flac"),
+                        "flac", ffmpeg=converter.find_ffmpeg(),
+                    )
+                except converter.ConvertError:
+                    pass
+            leftovers = [
+                p for p in glob.glob(os.path.join(td, ".*"))
+                if os.path.isfile(p)
+            ]
+            self.assertEqual(leftovers, [], f"临时文件泄漏: {leftovers}")
+
+
+# 1x1 透明 PNG,足够验证封面字节是否往返。
+TINY_PNG = bytes.fromhex(
+    "89504e470d0a1a0a0000000d4948445200000001000000010806000000"
+    "1f15c4890000000d4944415478da63fcffff3f0300050001a5f645bf0000"
+    "000049454e44ae426082"
+)
+
+
+class TestPicturePreservation(unittest.TestCase):
+    """转码/重采样必须保留内嵌封面。
+
+    ffmpeg 把 FLAC/MP3 封面当作 attached_pic 视频流,而转码命令使用
+    `-map 0:a:0 -vn`,因此需要靠 mutagen 抠出再写回。
+    """
+
+    cover_ready = False
+
+    @classmethod
+    def setUpClass(cls):
+        os.makedirs("_ut_tmp", exist_ok=True)
+        cls.ff = converter.find_ffmpeg()
+        cls.src_flac = os.path.join("_ut_tmp", "cover_src.flac")
+        import subprocess
+        subprocess.run(
+            [cls.ff, "-hide_banner", "-y", "-f", "lavfi", "-i",
+             "sine=frequency=440:duration=1", "-c:a", "flac", cls.src_flac],
+            capture_output=True, timeout=60,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        cls.cover_ready = converter.attach_picture(cls.src_flac, TINY_PNG, "flac")
+
+    def setUp(self):
+        if not self.cover_ready:
+            self.skipTest("mutagen 无法写入封面,跳过")
+
+    def _fresh_copy(self, name):
+        import shutil
+        target = os.path.join("_ut_tmp", name)
+        shutil.copyfile(self.src_flac, target)
+        return target
+
+    def test_attach_and_extract_roundtrip(self):
+        target = self._fresh_copy("rt.flac")
+        self.assertEqual(converter.extract_picture(target), TINY_PNG, "封面应原样取出")
+
+    def test_flac_to_flac_keeps_cover(self):
+        dst = os.path.join("_ut_tmp", "keep_cover.flac")
+        out = converter.convert_file(self.src_flac, dst, "flac", ffmpeg=self.ff)
+        self.assertEqual(converter.extract_picture(out), TINY_PNG, "FLAC 转 FLAC 必须保留封面")
+
+    def test_resample_keeps_cover(self):
+        target = self._fresh_copy("resample_cover.flac")
+        converter.resample_in_place(target, 48000, ffmpeg=self.ff)
+        self.assertEqual(converter.extract_picture(target), TINY_PNG, "重采样必须保留封面")
+
+    def test_flac_to_mp3_keeps_cover(self):
+        dst = os.path.join("_ut_tmp", "cover_out.mp3")
+        out = converter.convert_file(self.src_flac, dst, "mp3", ffmpeg=self.ff)
+        self.assertEqual(converter.extract_picture(out), TINY_PNG, "转 MP3 也应带上封面")
+
+    def test_attach_replaces_instead_of_duplicating(self):
+        target = self._fresh_copy("once.flac")
+        converter.attach_picture(target, TINY_PNG, "flac")
+        converter.attach_picture(target, TINY_PNG, "flac")
+        from mutagen.flac import FLAC
+        self.assertEqual(len(FLAC(target).pictures), 1, "重复写入不应产生多张封面")
+
+    def test_wav_output_skips_cover_silently(self):
+        """WAV 无标签容器,不应因此报错。"""
+        dst = os.path.join("_ut_tmp", "nowav.wav")
+        out = converter.convert_file(self.src_flac, dst, "wav", ffmpeg=self.ff)
+        self.assertTrue(os.path.exists(out))
+        self.assertEqual(converter.extract_picture(out), b"")
+
+    def test_extract_on_missing_file_returns_empty(self):
+        self.assertEqual(converter.extract_picture("_ut_tmp/does-not-exist.flac"), b"")
+
+    def test_extract_on_file_without_cover_returns_empty(self):
+        plain = os.path.join("_ut_tmp", "plain.wav")
+        import subprocess
+        subprocess.run(
+            [self.ff, "-hide_banner", "-y", "-f", "lavfi", "-i",
+             "sine=frequency=440:duration=1", plain],
+            capture_output=True, timeout=60,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        self.assertEqual(converter.extract_picture(plain), b"")
+
+
 if __name__ == "__main__":
     unittest.main()

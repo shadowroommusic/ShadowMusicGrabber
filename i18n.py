@@ -128,7 +128,45 @@ _EN = {
     # 采样率相关的运行期错误(来自 converter / downloader)
     "重采样失败 (ffmpeg ": "Resampling failed (ffmpeg ",
     "重采样后未生成有效输出文件": "Resampling produced no valid output file",
+    "提示: 封面未能写入输出文件": "Note: the cover art could not be written to the output",
     "重采样到 ": "Resampling to ",
+    # 解密页的输出命名开关
+    "按“歌手 - 歌名”重命名输出文件": "Rename output files as “Artist - Title”",
+    "· 取不到歌名时维持原文件名": "· Keeps the source filename when no title is available",
+    "输出命名: 按“歌手 - 歌名”": "Output naming: “Artist - Title”",
+    "输出命名: 沿用源文件名": "Output naming: keep the source filename",
+    "· 无法重命名(无歌名),维持: ": "· Cannot rename (no title), keeping: ",
+    "  已重命名 → ": "  renamed → ",
+    "⚠ 重命名失败: ": "⚠ Rename failed: ",
+    # 指纹识别
+    "标签缺失时用声学指纹联网识别": "Identify untagged files by acoustic fingerprint (online)",
+    "· 未找到 fpcalc(需下载到 bin 目录或 PATH)":
+        "· fpcalc not found (download it into bin\\ or add it to PATH)",
+    "· 已就绪,但尚未填写 AcoustID Key": "· Ready, but no AcoustID Key entered yet",
+    "· 已就绪": "· Ready",
+    "AcoustID Key:": "AcoustID Key:",
+    "在 acoustid.org 用 MusicBrainz 账号登录获取":
+        "Get one at acoustid.org with your MusicBrainz account",
+    "指纹识别尚不可用": "Fingerprinting is not available yet",
+    "指纹识别": "fingerprinting",
+    "识别中…": "Identifying…",
+    "⚠ 指纹识别缺少前置条件,本次会自动跳过(不影响解密):":
+        "⚠ Fingerprinting is missing prerequisites and will be skipped "
+        "(decryption is unaffected):",
+    "  fpcalc: ": "  fpcalc: ",
+    "  AcoustID Key: ": "  AcoustID Key: ",
+    "已开启指纹识别:标签缺失时会联网查询 AcoustID":
+        "Fingerprinting on: untagged files will be looked up on AcoustID (online)",
+    "已关闭指纹识别": "Fingerprinting off",
+    "  指纹识别 · ": "  fingerprint · ",
+    "✓ 已识别: ": "✓ identified: ",
+    " · 匹配度 ": " · match ",
+    "· 未匹配到歌曲: ": "· no match for: ",
+    "(AcoustID 对 QQ 音乐等中文曲库覆盖有限,属正常)":
+        " (AcoustID has limited coverage of QQ Music's Chinese catalog; this is normal)",
+    "  已写入封面": "  cover art written",
+    "  已写入标签": "  tags written",
+    "  标签已存在,无需覆盖": "  tags already present, nothing to overwrite",
     # 视频转音频页
     "视频转音频": "Video to Audio",
     "视频转音频 · 从链接或本地视频提取音轨": "Video to Audio · Extract audio from links or local videos",
@@ -395,6 +433,13 @@ _PREFIXES = (
     ("解密批次开始 · ", "Decrypt batch · "),
     (" 个文件 · ", " files · "),
     (" 个任务 · ", " tasks · "),
+    ("指纹已生成(", "fingerprint generated ("),
+    ("s),查询 AcoustID…", "s), querying AcoustID…"),
+    ("⚠ 跳过指纹识别: ", "⚠ fingerprinting skipped: "),
+    ("⚠ 指纹识别失败: ", "⚠ fingerprinting failed: "),
+    ("⚠ 指纹识别异常: ", "⚠ fingerprinting error: "),
+    ("⚠ 写入识别结果失败: ", "⚠ failed to write identified tags: "),
+    ("⚠ 重命名失败: ", "⚠ Rename failed: "),
 )
 
 # 正则兜底：处理中文出现在中间、或需要重排语序的文案

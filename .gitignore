@@ -12,6 +12,8 @@ dist_*/
 work/
 _ut_ncm/
 _ut_tmp/
+# 本地基准/调试产生的临时文件(以 _bench 前缀)
+_bench*
 bin/*.log
 
 # 第三方二进制(体积大, 请按 README 自行放入 bin/)

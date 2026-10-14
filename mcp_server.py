@@ -33,7 +33,7 @@ import ncm_decrypt  # noqa: E402
 import qmc_decrypt  # noqa: E402
 
 SERVER_NAME = "shadow-musicgrabber"
-SERVER_VERSION = "1.11.0"  # keep in sync with pyproject.toml / main.py APP_VERSION
+SERVER_VERSION = "1.12.0"  # keep in sync with pyproject.toml / main.py APP_VERSION
 PROTOCOL_VERSION = "2024-11-05"
 
 _ENCRYPTED_EXTS = {".ncm"} | set(qmc_decrypt.QMC_EXTS)
@@ -231,10 +231,12 @@ def _decrypt_one(
     ext = os.path.splitext(src)[1].lower()
     if ext == ".ncm":
         target = ncm_decrypt.make_output_path(src, out_dir, reserved)
-        raw, meta = ncm_decrypt.decrypt_file(src, target, ffmpeg=converter.find_ffmpeg())
+        raw, meta = ncm_decrypt.decrypt_file(
+            src, target, ffmpeg=converter.find_ffmpeg(), rename_by_meta=True
+        )
     elif ext in qmc_decrypt.QMC_EXTS:
         target = qmc_decrypt.make_output_path(src, out_dir, reserved)
-        raw, meta = qmc_decrypt.decrypt_file(src, target)
+        raw, meta = qmc_decrypt.decrypt_file(src, target, rename_by_meta=True)
     else:
         raise ToolError(
             f"Unsupported encrypted file {ext!r}; supported: .ncm and QMC "

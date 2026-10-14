@@ -197,5 +197,201 @@ class TestQmcErrors(unittest.TestCase):
             qmc_decrypt.decrypt_qmc_bytes(b"\x01\x02", ".mflac")
 
 
+class TestQtagTitle(unittest.TestCase):
+    """QTag 尾部的歌名提取(取不到必须安静返回空串)。"""
+
+    @staticmethod
+    def _build_qtag(chunk: bytes) -> bytes:
+        """按真实 QTag 布局构造尾部: [数据][QTag 数据][4 字节大端长度]["QTag"]。"""
+        import struct as _s
+        return b"AUDIO" + chunk + _s.pack(">I", len(chunk)) + b"QTag"
+
+    def _title(self, chunk):
+        data = self._build_qtag(chunk)
+        return qmc_decrypt._read_qtag_title(io.BytesIO(data), len(data))
+
+    def test_picks_cjk_second_segment(self):
+        self.assertEqual(self._title("QUJDRA==,我的歌名".encode("utf-8")), "我的歌名")
+
+    def test_skips_key_segment(self):
+        """首段是 Base64 密钥, 不能被当成歌名。"""
+        self.assertEqual(self._title("QUJDREVGR0g=,晴天".encode("utf-8")), "晴天")
+
+    def test_ignores_hex_only_segment(self):
+        self.assertEqual(self._title("QUJDRA==,deadbeefdeadbeef".encode("utf-8")), "")
+
+    def test_accepts_spaces_in_title(self):
+        self.assertEqual(self._title("QUJDRA==,A Song Title".encode("utf-8")), "A Song Title")
+
+    def test_no_comma_returns_empty(self):
+        self.assertEqual(self._title(b"QUJDRA=="), "")
+
+    def test_non_qtag_file_returns_empty(self):
+        # 尾部不是 "QTag",应直接返回空串
+        data = b"AUDIO" + b"tail" + (4).to_bytes(4, "big") + b"XXXX"
+        self.assertEqual(qmc_decrypt._read_qtag_title(io.BytesIO(data), len(data)), "")
+
+    def test_tiny_file_is_safe(self):
+        self.assertEqual(qmc_decrypt._read_qtag_title(io.BytesIO(b"ab"), 2), "")
+
+    def test_real_fixture_does_not_crash(self):
+        """真实夹具可能没有歌名, 但绝不能抛异常。"""
+        data = fixture("v2_qtag_v2key.mflac0")
+        qmc_decrypt._read_qtag_title(io.BytesIO(data), len(data))
+
+
+class TestTrackFilename(unittest.TestCase):
+    """按"歌手 - 歌名"生成安全文件名。"""
+
+    def test_artist_and_title(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = qmc_decrypt.build_track_filename("周杰伦", "晴天", ".flac", td)
+            self.assertEqual(os.path.basename(p), "周杰伦 - 晴天.flac")
+
+    def test_title_only(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = qmc_decrypt.build_track_filename("", "无题", ".flac", td)
+            self.assertEqual(os.path.basename(p), "无题.flac")
+
+    def test_no_title_returns_none(self):
+        with tempfile.TemporaryDirectory() as td:
+            self.assertIsNone(qmc_decrypt.build_track_filename("歌手", "", ".flac", td))
+
+    def test_collision_gets_suffix(self):
+        with tempfile.TemporaryDirectory() as td:
+            first = qmc_decrypt.build_track_filename("A", "歌", ".flac", td)
+            open(first, "wb").close()
+            second = qmc_decrypt.build_track_filename("A", "歌", ".flac", td)
+            self.assertEqual(os.path.basename(second), "A - 歌_1.flac")
+
+    def test_reserved_set_prevents_collision(self):
+        with tempfile.TemporaryDirectory() as td:
+            reserved = set()
+            first = qmc_decrypt.build_track_filename("A", "歌", ".flac", td, reserved)
+            second = qmc_decrypt.build_track_filename("A", "歌", ".flac", td, reserved)
+            self.assertNotEqual(os.path.normcase(first), os.path.normcase(second))
+
+    def test_illegal_chars_are_replaced(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = qmc_decrypt.build_track_filename("AC/DC", "a<b>c:d", ".flac", td)
+            name = os.path.basename(p)
+            for ch in '<>:"/\\|?*':
+                self.assertNotIn(ch, name)
+
+    def test_control_chars_stripped(self):
+        self.assertEqual(qmc_decrypt._safe_filename_component("a\x00b\x1fc"), "abc")
+
+    def test_reserved_device_name_escaped(self):
+        self.assertEqual(qmc_decrypt._safe_filename_component("CON"), "_CON")
+        self.assertEqual(qmc_decrypt._safe_filename_component("com1"), "_com1")
+
+    def test_name_length_capped(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = qmc_decrypt.build_track_filename("", "长" * 400, ".flac", td)
+            self.assertLessEqual(len(os.path.basename(p)), 130)
+
+    def test_empty_input_falls_back(self):
+        self.assertEqual(qmc_decrypt._safe_filename_component("", "fb"), "fb")
+
+
+class TestWriteBasicTags(unittest.TestCase):
+    """给裸音频补写标签。"""
+
+    def _make_flac(self, td):
+        from converter import find_ffmpeg
+        import subprocess
+        ff = find_ffmpeg()
+        path = os.path.join(td, "t.flac")
+        subprocess.run(
+            [ff, "-hide_banner", "-y", "-f", "lavfi", "-i",
+             "sine=frequency=440:duration=1", "-c:a", "flac", path],
+            capture_output=True, timeout=60,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        return path
+
+    def test_writes_title(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = self._make_flac(td)
+            self.assertTrue(qmc_decrypt.write_basic_tags(path, title="测试歌名"))
+            from mutagen.flac import FLAC
+            # mutagen 的 Vorbis 标签读取出来是单元素列表
+            self.assertEqual(FLAC(path)["title"], ["测试歌名"])
+
+    def test_does_not_overwrite_existing(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = self._make_flac(td)
+            qmc_decrypt.write_basic_tags(path, title="原标题")
+            qmc_decrypt.write_basic_tags(path, title="新标题")
+            from mutagen.flac import FLAC
+            self.assertEqual(FLAC(path)["title"], ["原标题"], "已有标签不应被覆盖")
+
+    def test_no_inputs_is_noop(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = self._make_flac(td)
+            self.assertFalse(qmc_decrypt.write_basic_tags(path))
+
+    def test_invalid_file_returns_false(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, "not_audio.flac")
+            with open(path, "wb") as f:
+                f.write(b"garbage")
+            self.assertFalse(qmc_decrypt.write_basic_tags(path, title="x"))
+
+
+class TestDecryptRenaming(unittest.TestCase):
+    """decrypt_file(rename_by_meta=True) 应输出"歌手 - 歌名"。"""
+
+    def _ncm(self, td, meta):
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from test_ncm import make_ncm
+        import ncm_decrypt as ncm_mod
+
+        audio = b"fLaC" + b"\x00" * 2048
+        blob = make_ncm(audio, meta)
+        src = os.path.join(td, "song.ncm")
+        with open(src, "wb") as f:
+            f.write(blob)
+        return src, ncm_mod
+
+    def test_ncm_renamed_by_meta(self):
+        with tempfile.TemporaryDirectory() as td:
+            src, ncm_mod = self._ncm(
+                td, {"musicName": "稻香", "artist": [["周杰伦"]], "format": "flac"}
+            )
+            out, meta = ncm_mod.decrypt_file(
+                src, os.path.join(td, "song.flac"), rename_by_meta=True
+            )
+            self.assertEqual(os.path.basename(out), "周杰伦 - 稻香.flac")
+            self.assertTrue(os.path.exists(out))
+
+    def test_ncm_without_rename_keeps_path(self):
+        with tempfile.TemporaryDirectory() as td:
+            src, ncm_mod = self._ncm(
+                td, {"musicName": "稻香", "artist": [["周杰伦"]], "format": "flac"}
+            )
+            dst = os.path.join(td, "song.flac")
+            out, _ = ncm_mod.decrypt_file(src, dst)
+            self.assertEqual(out, os.path.abspath(dst))
+
+    def test_ncm_missing_title_keeps_path(self):
+        with tempfile.TemporaryDirectory() as td:
+            src, ncm_mod = self._ncm(td, {"artist": [["无名氏"]], "format": "flac"})
+            out, _ = ncm_mod.decrypt_file(
+                src, os.path.join(td, "song.flac"), rename_by_meta=True
+            )
+            self.assertEqual(os.path.basename(out), "song.flac")
+
+    def test_qmc_renaming_is_opt_in(self):
+        """QMC 夹具没有歌名时必须维持源文件名,不能凭空改名。"""
+        with tempfile.TemporaryDirectory() as td:
+            src = os.path.join(td, "x.qmcflac")
+            shutil.copyfile(os.path.join(FIXDIR, "v1_static.qmcflac"), src)
+            out, _ = qmc_decrypt.decrypt_file(
+                src, os.path.join(td, "x.flac"), rename_by_meta=True
+            )
+            self.assertTrue(os.path.basename(out).endswith(".flac"))
+
+
 if __name__ == "__main__":
     unittest.main()

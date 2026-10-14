@@ -172,6 +172,129 @@ class ConvertError(Exception):
 # 常用输出采样率 (Hz)。None / 0 表示跟随源文件,不重采样。
 SAMPLE_RATE_CHOICES: tuple[int, ...] = (44100, 48000, 96000, 192000)
 
+# 支持内嵌封面的输出格式。WAV/AIFF 这类无标签容器除外。
+PICTURE_CAPABLE_FORMATS = {"flac", "mp3", "m4a", "aac", "ogg", "opus", "wma", "ape", "alac"}
+
+
+def _sniff_image_mime(data: bytes) -> str:
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if data[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if data[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return "image/jpeg"
+
+
+def extract_picture(path: str) -> bytes:
+    """从音频文件读出内嵌封面的原始字节;没有封面或读取失败时返回空。
+
+    ffmpeg 会把 FLAC/MP3 的封面当作 attached_pic 视频流,我们的转码命令用
+    `-map 0:a:0 -vn` 只保留音频,封面必然丢失。因此这里先用 mutagen 把封面
+    抠出来,转码完成后再写回去。
+    """
+    if not path or not os.path.isfile(path):
+        return b""
+    try:
+        import mutagen
+
+        audio = mutagen.File(path)
+        if audio is None:
+            return b""
+
+        # FLAC / 其他提供 .pictures 的格式
+        pictures = getattr(audio, "pictures", None)
+        if pictures:
+            return bytes(pictures[0].data)
+
+        tags = getattr(audio, "tags", None)
+        if not tags:
+            return b""
+        try:
+            keys = list(tags.keys())
+        except Exception:  # noqa: BLE001 - 某些 tags 实现不支持 keys()
+            return b""
+
+        for key in keys:
+            name = str(key).upper()
+            value = tags[key]
+            # MP4/M4A: covr
+            if name == "COVR" and value:
+                entry = value[0] if isinstance(value, (list, tuple)) else value
+                return bytes(entry)
+            # ID3: APIC:description
+            if name.startswith("APIC"):
+                data = getattr(value, "data", None)
+                if data:
+                    return bytes(data)
+            # APEv2 / VorbisComment: COVERART (裸字节或 base64)
+            if name in ("COVERART", "COVERARTFRONT"):
+                if isinstance(value, (bytes, bytearray)):
+                    return bytes(value)
+                if isinstance(value, str):
+                    import base64 as _b64
+                    try:
+                        return _b64.b64decode(value, validate=True)
+                    except Exception:  # noqa: BLE001
+                        continue
+            # VorbisComment: METADATA_BLOCK_PICTURE (base64 FLAC Picture 块)
+            if name == "METADATA_BLOCK_PICTURE" and isinstance(value, str):
+                import base64 as _b64
+                try:
+                    from mutagen.flac import Picture
+                    pic = Picture(_b64.b64decode(value, validate=True))
+                    return bytes(pic.data)
+                except Exception:  # noqa: BLE001
+                    continue
+    except Exception:  # noqa: BLE001 - 取封面失败绝不影响转码本身
+        return b""
+    return b""
+
+
+def attach_picture(path: str, data: bytes, fmt: str = "") -> bool:
+    """把封面字节写回音频文件;成功返回 True。
+
+    FLAC 走 PICTURE 块,MP3 走 ID3 APIC,其余格式尽力而为,失败一律不影响主流程。
+    """
+    if not data:
+        return False
+    target = (fmt or os.path.splitext(path)[1].lstrip(".")).lower()
+    mime = _sniff_image_mime(data)
+    try:
+        if target == "flac":
+            from mutagen.flac import FLAC, Picture
+
+            audio = FLAC(path)
+            # 避免重复添加同一张封面
+            if audio.pictures:
+                audio.clear_pictures()
+            pic = Picture()
+            pic.type = 3  # front cover
+            pic.mime = mime
+            pic.data = data
+            audio.add_picture(pic)
+            audio.save()
+            return True
+        if target == "mp3":
+            from mutagen.id3 import APIC, ID3
+            from mutagen.mp3 import MP3
+
+            audio = MP3(path)
+            if audio.tags is None:
+                audio.add_tags()
+            try:
+                audio.tags.delall("APIC")
+            except Exception:  # noqa: BLE001 - 没有旧封面可删
+                pass
+            audio.tags.add(APIC(encoding=3, mime=mime, type=3, desc="Cover", data=data))
+            audio.save()
+            return True
+    except Exception:  # noqa: BLE001 - 写封面失败不致命
+        return False
+    return False
+
 
 def normalize_sample_rate(value: Optional[object]) -> Optional[int]:
     """把 UI/配置里的采样率值规范成 ffmpeg 可用的整数 Hz,无效输入返回 None。"""
@@ -265,6 +388,12 @@ def convert_file(
     ]
 
     tail: deque[str] = deque(maxlen=20)
+    # `-map 0:a:0 -vn` 只保留音频,内嵌封面会被丢掉。目标格式能存封面时,
+    # 先把源封面抠出来,转码完成后再写回去。
+    cover = b""
+    if fmt in PICTURE_CAPABLE_FORMATS:
+        cover = extract_picture(src)
+
     # Probe before starting ffmpeg so its merged stderr/stdout pipe is drained
     # immediately after launch and cannot fill while a probe is running.
     duration = _probe_duration(src, ffmpeg_exe)
@@ -310,6 +439,12 @@ def convert_file(
             raise ConvertError(f"ffmpeg 退出码 {rc}{suffix}")
         if not os.path.isfile(temp_path) or os.path.getsize(temp_path) <= 0:
             raise ConvertError("转码后未生成有效输出文件")
+
+        if cover:
+            # 在 os.replace 之前回写封面,失败也不影响音频输出。
+            # 注意不能把 on_line 写进条件里:多数调用方不传日志回调。
+            if not attach_picture(temp_path, cover, fmt) and on_line:
+                on_line("提示: 封面未能写入输出文件")
 
         try:
             os.replace(temp_path, dst)
@@ -407,6 +542,9 @@ def resample_in_place(
 
     # 改变采样率必须重新编码:-c copy 流拷贝时 ffmpeg 会拒绝重采样。
     codec_args = _resample_encoder_args(*_probe_audio_codec(path, ffmpeg_exe))
+    # 同 convert_file:-map 0:a:0 -vn 会丢掉内嵌封面,先抠出来转码后写回。
+    cover = extract_picture(path)
+    out_fmt = os.path.splitext(path)[1].lstrip(".").lower()
     cmd = [
         ffmpeg_exe, "-hide_banner", "-nostdin", "-y",
         "-i", path,
@@ -433,6 +571,8 @@ def resample_in_place(
             raise ConvertError(f"重采样失败 (ffmpeg {proc.returncode}): {detail}")
         if not os.path.isfile(temp_path) or os.path.getsize(temp_path) <= 0:
             raise ConvertError("重采样后未生成有效输出文件")
+        if cover:
+            attach_picture(temp_path, cover, out_fmt)
         os.replace(temp_path, path)
     finally:
         if os.path.exists(temp_path):

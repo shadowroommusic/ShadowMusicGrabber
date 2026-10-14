@@ -304,5 +304,107 @@ class TestDecryptFile(unittest.TestCase):
         self.assertNotEqual(os.path.normcase(os.path.abspath(p1)), os.path.normcase(os.path.abspath(p2)))
 
 
+class NcmMetaFieldsTests(unittest.TestCase):
+    """NCM 元数据里可用但此前未写入的字段(专辑艺人/日期/曲号/碟号/流派)。"""
+
+    def _meta(self, **json_fields):
+        payload = {"musicName": "歌名", "artist": [["歌手A"]], "album": "专辑"}
+        payload.update(json_fields)
+        return ncm_decrypt.NcmMeta(
+            music_name=payload["musicName"],
+            artist="歌手A",
+            album=payload["album"],
+            raw_json=payload,
+        )
+
+    def test_album_artist_falls_back_to_artist(self):
+        self.assertEqual(self._meta().album_artist, "歌手A")
+
+    def test_album_artist_from_field(self):
+        self.assertEqual(self._meta(albumArtist="专辑歌手").album_artist, "专辑歌手")
+
+    def test_album_artist_from_list(self):
+        self.assertEqual(self._meta(albumArtist=["甲", "乙"]).album_artist, "甲")
+
+    def test_publish_date_from_millis(self):
+        # 2021-01-01T00:00:00Z
+        self.assertEqual(self._meta(publishTime=1609459200000).publish_date, "2021-01-01")
+
+    def test_publish_date_from_string(self):
+        self.assertEqual(self._meta(publishTimeText="2019-05-06").publish_date, "2019-05-06")
+
+    def test_publish_date_absent(self):
+        self.assertEqual(self._meta().publish_date, "")
+
+    def test_publish_date_zero_is_ignored(self):
+        self.assertEqual(self._meta(publishTime=0).publish_date, "")
+
+    def test_track_number(self):
+        self.assertEqual(self._meta(no=7).track_number, "7")
+        self.assertEqual(self._meta(no="3").track_number, "3")
+
+    def test_track_number_zero_is_ignored(self):
+        """网易云用 no=0 表示未知曲号,不该写进标签。"""
+        self.assertEqual(self._meta(no=0).track_number, "")
+
+    def test_disc_number(self):
+        self.assertEqual(self._meta(discNumber=2).disc_number, "2")
+        self.assertEqual(self._meta(discNumber=0).disc_number, "")
+
+    def test_genre_list_is_joined(self):
+        self.assertEqual(self._meta(genre=["流行", "摇滚"]).genre, "流行/摇滚")
+
+    def test_empty_meta_is_safe(self):
+        empty = ncm_decrypt.NcmMeta()
+        self.assertEqual(empty.album_artist, "")
+        self.assertEqual(empty.publish_date, "")
+        self.assertEqual(empty.track_number, "")
+        self.assertEqual(empty.disc_number, "")
+        self.assertEqual(empty.genre, "")
+
+
+class NcmFlacTagTests(unittest.TestCase):
+    """write_flac_meta 应把上述字段与封面一起写进 FLAC。"""
+
+    def test_writes_all_fields_and_cover(self):
+        import subprocess
+        from converter import find_ffmpeg
+
+        os.makedirs("_ut_ncm", exist_ok=True)
+        ff = find_ffmpeg()
+        src = os.path.join("_ut_ncm", "tag.wav")
+        flac = os.path.join("_ut_ncm", "tag_out.flac")
+        subprocess.run(
+            [ff, "-hide_banner", "-y", "-f", "lavfi", "-i",
+             "sine=frequency=440:duration=1", "-c:a", "flac", flac],
+            capture_output=True, timeout=60,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+
+        payload = {
+            "musicName": "完整标签", "artist": [["主唱"]],
+            "album": "某专辑", "albumArtist": "某组合",
+            "publishTime": 1609459200000, "no": 5, "discNumber": 1,
+            "genre": ["流行"],
+        }
+        meta = ncm_decrypt.NcmMeta(
+            music_name="完整标签", artist="主唱", album="某专辑", raw_json=payload
+        )
+        ncm_decrypt.write_flac_meta(flac, meta, TINY_PNG, "完整标签 - 主唱")
+
+        from mutagen.flac import FLAC
+        audio = FLAC(flac)
+        # mutagen 的 Vorbis 标签读取出来是单元素列表
+        self.assertEqual(audio["title"], ["完整标签"])
+        self.assertEqual(audio["artist"], ["主唱"])
+        self.assertEqual(audio["album"], ["某专辑"])
+        self.assertEqual(audio["albumartist"], ["某组合"])
+        self.assertEqual(audio["date"], ["2021-01-01"])
+        self.assertEqual(audio["tracknumber"], ["5"])
+        self.assertEqual(audio["discnumber"], ["1"])
+        self.assertEqual(audio["genre"], ["流行"])
+        self.assertEqual(len(audio.pictures), 1, "封面应写入")
+
+
 if __name__ == "__main__":
     unittest.main()

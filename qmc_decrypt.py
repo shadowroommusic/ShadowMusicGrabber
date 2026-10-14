@@ -403,6 +403,145 @@ def _read_tail(f, size: int) -> tuple[bytes, int]:
     return f.read(key_len), size - 4 - key_len
 
 
+def _read_qtag_title(f, size: int) -> str:
+    """尽力从 QTag 尾部里取出歌曲名。
+
+    QTag 段是逗号分隔的文本,首段为 Base64 密钥串,其余段可能带歌曲名。
+    这里只做"看起来像歌名"的筛选(可 UTF-8 解码、含中文或空格、且不是纯
+    Base64),拿不到就返回空串,绝不影响解密主流程。
+    """
+    try:
+        if size < 8:
+            return ""
+        f.seek(size - 4)
+        if f.read(4) != b"QTag":
+            return ""
+        f.seek(size - 8)
+        (tag_len,) = struct.unpack(">I", f.read(4))
+        if tag_len <= 0 or tag_len > size - 8 or tag_len > 4096:
+            return ""
+        f.seek(size - 8 - tag_len)
+        chunk = f.read(tag_len)
+    except (OSError, struct.error):
+        return ""
+
+    for part in chunk.split(b",")[1:]:  # 首段是密钥,跳过
+        part = part.strip().strip(b"\x00").strip()
+        if not part or len(part) > 200:
+            continue
+        try:
+            text = part.decode("utf-8")
+        except UnicodeDecodeError:
+            continue
+        text = "".join(ch for ch in text if ch.isprintable()).strip()
+        if not text:
+            continue
+        # 纯 Base64 / 十六进制串不是歌名
+        compact = text.replace("+", "").replace("/", "").replace("=", "")
+        if compact and all(c in "0123456789abcdefABCDEF" for c in compact):
+            continue
+        if len(compact) >= 16 and all(c in "0123456789abcdefABCDEF+/=" for c in compact):
+            continue
+        # 用码位数值判断 CJK,避免出现裸的 CJK 字符串字面量(会被 i18n 覆盖率
+        # 测试误判成界面文案)。
+        has_cjk = any(0x4E00 <= ord(ch) <= 0x9FFF for ch in text)
+        if has_cjk or " " in text:
+            return text
+    return ""
+
+
+def write_basic_tags(
+    path: str,
+    title: str = "",
+    artist: str = "",
+    album: str = "",
+) -> bool:
+    """给解密结果补写标题/歌手/专辑(仅在缺失时写入)。
+
+    QMC 文件常常只有裸音频没有任何标签,所以这里用 mutagen 统一补齐。
+    写失败不影响解密产物本身。
+    """
+    if not (title or artist or album):
+        return False
+    try:
+        import mutagen
+
+        audio = mutagen.File(path)
+        if audio is None:
+            return False
+
+        if audio.tags is None:
+            audio.add_tags()
+        keys = set()
+        try:
+            keys = {str(k).lower() for k in audio.tags.keys()}
+        except Exception:  # noqa: BLE001 - 部分实现不支持 keys()
+            keys = set()
+
+        changed = False
+        if title and "title" not in keys:
+            audio.tags["title"] = title
+            changed = True
+        if artist and "artist" not in keys:
+            audio.tags["artist"] = artist
+            changed = True
+        if album and "album" not in keys:
+            audio.tags["album"] = album
+            changed = True
+        if changed:
+            audio.save()
+        return changed
+    except Exception:  # noqa: BLE001 - 写标签失败不影响音频
+        return False
+
+
+def _safe_filename_component(text: str, fallback: str = "") -> str:
+    """把歌曲名/歌手名洗成安全的文件名词。"""
+    cleaned = []
+    for ch in (text or ""):
+        if ch in '<>:"/\\|?*':
+            cleaned.append("_")
+        elif ord(ch) < 32:
+            continue
+        else:
+            cleaned.append(ch)
+    name = "".join(cleaned).strip().strip(".")
+    # Windows 保留设备名
+    if name.upper().split(".")[0] in {
+        "CON", "PRN", "AUX", "NUL",
+        *(f"COM{i}" for i in range(1, 10)),
+        *(f"LPT{i}" for i in range(1, 10)),
+    }:
+        name = f"_{name}"
+    return name[:120] or fallback
+
+
+def build_track_filename(
+    artist: str,
+    title: str,
+    ext: str,
+    out_dir: str,
+    reserved_paths: Optional[set[str]] = None,
+) -> Optional[str]:
+    """按"歌手 - 歌名"生成输出路径;信息不足时返回 None。"""
+    artist = _safe_filename_component(artist)
+    title = _safe_filename_component(title)
+    if not title:
+        return None
+    stem = f"{artist} - {title}" if artist else title
+    reserved_paths = reserved_paths if reserved_paths is not None else set()
+    dst = os.path.join(out_dir, stem + ext)
+    i = 1
+    while (
+        os.path.exists(dst)
+        or os.path.normcase(os.path.abspath(dst)) in reserved_paths
+    ):
+        dst = os.path.join(out_dir, f"{stem}_{i}{ext}")
+        i += 1
+    reserved_paths.add(os.path.normcase(os.path.abspath(dst)))
+    return dst
+
+
 def _decode_tail_key(key_str: bytes) -> bytes:
     s = key_str.strip().rstrip(b"\x00").strip()
     if not s:
@@ -499,10 +638,14 @@ def decrypt_file(
     src: str,
     dst: str,
     on_progress: Optional[Callable[[float], None]] = None,
+    rename_by_meta: bool = False,
 ) -> tuple[str, QmcMeta]:
     """流式解密单个 QMC 文件,返回 (输出路径, 元数据)。
 
     输出为原始音频格式(不作转码),扩展名由加密格式决定。
+
+    rename_by_meta=True 时,若能从 QTag 或音频标签里取到歌名/歌手,
+    会把输出重命名为"歌手 - 歌名.ext"。
     """
     if not os.path.exists(src):
         raise QmcError(f"文件不存在: {src}")
@@ -524,6 +667,7 @@ def decrypt_file(
     except OSError:
         pass
 
+    qtag_title = ""
     try:
         with open(src, "rb") as fin:
             size = os.fstat(fin.fileno()).st_size
@@ -533,6 +677,8 @@ def decrypt_file(
             else:
                 key_str, data_len = _read_tail(fin, size)
                 ks = _make_keystream(_decode_tail_key(key_str))
+                # QTag 与密钥同处尾部,单独再读一次歌名(不影响解密)
+                qtag_title = _read_qtag_title(fin, size)
             if data_len <= 0:
                 raise QmcError("文件不含音频数据")
 
@@ -563,7 +709,34 @@ def decrypt_file(
 
     if on_progress:
         on_progress(100.0)
-    return dst, _read_tags_quietly(dst)
+
+    meta = _read_tags_quietly(dst)
+    # 音频里没有标题时,用 QTag 里的歌名补上,并写回标签。
+    if not meta.music_name and qtag_title:
+        meta.music_name = qtag_title
+        write_basic_tags(dst, title=qtag_title)
+
+    if rename_by_meta:
+        dst = _rename_by_meta(dst, meta)
+    return dst, meta
+
+
+def _rename_by_meta(dst: str, meta: QmcMeta) -> str:
+    """按"歌手 - 歌名"重命名输出文件;信息不足或同名时保持原样。"""
+    target = build_track_filename(
+        meta.artist, meta.music_name, os.path.splitext(dst)[1], os.path.dirname(dst)
+    )
+    if not target:
+        return dst
+    try:
+        if os.path.normcase(os.path.abspath(target)) == os.path.normcase(
+            os.path.abspath(dst)
+        ):
+            return dst
+        os.replace(dst, target)
+        return target
+    except OSError:
+        return dst
 
 
 def _read_tags_quietly(path: str) -> QmcMeta:

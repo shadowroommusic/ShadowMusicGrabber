@@ -9,6 +9,11 @@ binaries = []
 _beatportdl = os.path.join("bin", "beatportdl.exe")
 if os.path.isfile(_beatportdl):
     binaries.append((_beatportdl, "bin"))
+# fpcalc(Chromaprint) 用于声学指纹识别, 同样是外部二进制; 放了才打包。
+# 下载: https://github.com/acoustid/chromaprint/releases (chromaprint-fpcalc-*-windows-x86_64.zip)
+_fpcalc = os.path.join("bin", "fpcalc.exe")
+if os.path.isfile(_fpcalc):
+    binaries.append((_fpcalc, "bin"))
 hiddenimports = []
 tmp_ret = collect_all('yt_dlp')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]

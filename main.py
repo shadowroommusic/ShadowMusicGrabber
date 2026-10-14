@@ -22,6 +22,7 @@ import customtkinter as ctk
 import converter
 import downloader
 import dragdrop
+import fingerprint
 import i18n
 import ncm_decrypt
 import premium
@@ -29,7 +30,7 @@ import qmc_decrypt
 import updater
 
 APP_NAME = "Shadow MusicGrabber"
-APP_VERSION = "1.11.0"
+APP_VERSION = "1.12.0"
 
 # 界面语言：先读已保存的设置，否则按系统语言；控件在构造时由 i18n 统一翻译。
 i18n.install()
@@ -163,6 +164,11 @@ class App(ctk.CTk):
         self._closing = False
         self._update_busy = False
         self.ffmpeg = converter.find_ffmpeg()
+        # 解密产物是否按"歌手 - 歌名"重命名(取不到歌名时维持源文件名)。
+        self.rename_by_meta = True
+        # 缺标签时是否用声学指纹联网补全(需 fpcalc + AcoustID API Key)。
+        self.fingerprint_enabled = False
+        self.fingerprint_key = ""
 
         self._build_ui()
         self.after(100, self._drain_ui_queue)
@@ -763,6 +769,13 @@ class App(ctk.CTk):
 
     def _va_add_files(self, paths) -> int:
         added = 0
+        # 同批次内不同来源可能产出同名文件(如 A/song.mp4 与 B/song.mp4),
+        # 必须用 reserved 集合去重,否则后一个任务会静默覆盖前一个的结果。
+        reserved: set[str] = {
+            os.path.normcase(os.path.abspath(getattr(t, "dst", "")))
+            for t in self.va_tasks
+            if getattr(t, "dst", "")
+        }
         for raw in paths:
             f = os.path.abspath(os.fspath(raw))
             if not converter.is_supported(f):
@@ -772,7 +785,7 @@ class App(ctk.CTk):
                 continue
             fmt = self.va_fmt_var.get()
             out_dir = self.va_out_var.get().strip() or self.default_out_dir
-            dst = converter.build_output_path(f, out_dir, fmt)
+            dst = converter.build_output_path(f, out_dir, fmt, reserved)
             task = converter.ConvertTask(src=f, dst=dst, fmt=fmt)
             self.va_tasks.append(task)
             row = TaskRow(self.va_container, task)
@@ -958,6 +971,63 @@ class App(ctk.CTk):
         )
         self.ncm_rate_hint.pack(side="left", padx=(12, 0))
 
+        opt_row = ctk.CTkFrame(parent, fg_color="transparent")
+        opt_row.pack(fill="x", padx=10, pady=(0, 4))
+        self.rename_var = ctk.BooleanVar(value=True)
+        ctk.CTkSwitch(
+            opt_row,
+            text="按“歌手 - 歌名”重命名输出文件",
+            variable=self.rename_var,
+            command=self._on_rename_toggle,
+            font=ctk.CTkFont(size=12),
+            text_color=TEXT,
+            progress_color=ACCENT,
+            fg_color=BUTTON,
+            button_color=TEXT,
+            button_hover_color=TEXT,
+        ).pack(side="left")
+        ctk.CTkLabel(
+            opt_row,
+            text="· 取不到歌名时维持原文件名",
+            anchor="w", text_color=MUTED, font=ctk.CTkFont(size=12),
+        ).pack(side="left", padx=(10, 0))
+
+        fp_row = ctk.CTkFrame(parent, fg_color="transparent")
+        fp_row.pack(fill="x", padx=10, pady=(0, 4))
+        self.fp_var = ctk.BooleanVar(value=False)
+        ctk.CTkSwitch(
+            fp_row,
+            text="标签缺失时用声学指纹联网识别",
+            variable=self.fp_var,
+            command=self._on_fingerprint_toggle,
+            font=ctk.CTkFont(size=12),
+            text_color=TEXT,
+            progress_color=ACCENT,
+            fg_color=BUTTON,
+            button_color=TEXT,
+            button_hover_color=TEXT,
+        ).pack(side="left")
+        self.fp_status = ctk.CTkLabel(
+            fp_row, text=self._fingerprint_status_text(), anchor="w",
+            text_color=MUTED, font=ctk.CTkFont(size=12),
+        )
+        self.fp_status.pack(side="left", padx=(10, 0))
+
+        key_row = ctk.CTkFrame(parent, fg_color="transparent")
+        key_row.pack(fill="x", padx=10, pady=(0, 4))
+        ctk.CTkLabel(key_row, text="AcoustID Key:").pack(side="left")
+        self.fp_key_var = ctk.StringVar(value="")
+        ctk.CTkEntry(
+            key_row, textvariable=self.fp_key_var, width=300, show="*",
+            placeholder_text="在 acoustid.org 用 MusicBrainz 账号登录获取",
+            fg_color="#0f0f10", border_color=BORDER, text_color=TEXT,
+        ).pack(side="left", padx=6)
+        # Key 填完即生效,不需要额外点保存。
+        self.fp_key_var.trace_add(
+            "write",
+            lambda *_: setattr(self, "fingerprint_key", self.fp_key_var.get().strip()),
+        )
+
         btn_frame = ctk.CTkFrame(parent, fg_color="transparent")
         btn_frame.pack(fill="x", padx=10, pady=6)
         self._button(btn_frame, "添加加密文件…", self._pick_ncm_files, width=150).pack(side="left")
@@ -1058,6 +1128,46 @@ class App(ctk.CTk):
                 if hasattr(self, "ncm_rate_hint"):
                     self.ncm_rate_hint.configure(text=self._cv_rate_hint(value))
                 return
+
+    def _on_rename_toggle(self):
+        """解密产物是否按"歌手 - 歌名"命名。"""
+        self.rename_by_meta = bool(self.rename_var.get())
+        self._log(
+            "输出命名: 按“歌手 - 歌名”"
+            if self.rename_by_meta
+            else "输出命名: 沿用源文件名"
+        )
+
+    def _fingerprint_status_text(self) -> str:
+        """指纹识别的就绪状态:fpcalc 在不在、Key 有没有。"""
+        if not fingerprint.find_fpcalc():
+            return "· 未找到 fpcalc(需下载到 bin 目录或 PATH)"
+        if not self.fingerprint_key:
+            return "· 已就绪,但尚未填写 AcoustID Key"
+        return "· 已就绪"
+
+    def _on_fingerprint_toggle(self):
+        self.fingerprint_enabled = bool(self.fp_var.get())
+        self.fingerprint_key = self.fp_key_var.get().strip()
+        if hasattr(self, "fp_status"):
+            self.fp_status.configure(text=self._fingerprint_status_text())
+        if self.fingerprint_enabled:
+            missing = []
+            if not fingerprint.find_fpcalc():
+                missing.append("fpcalc")
+            if not self.fingerprint_key:
+                missing.append("AcoustID Key")
+            if missing:
+                # 这里不用模态弹窗:开关是可反复切换的,弹窗会打断操作,
+                # 而且开关显示为"开"但功能不可用,容易误解。改为日志 + 状态栏提示。
+                self._log("⚠ 指纹识别缺少前置条件,本次会自动跳过(不影响解密):"
+                          + "、".join(missing))
+                self._log("  fpcalc: https://github.com/acoustid/chromaprint/releases")
+                self._log("  AcoustID Key: https://acoustid.org/")
+            else:
+                self._log("已开启指纹识别:标签缺失时会联网查询 AcoustID")
+        else:
+            self._log("已关闭指纹识别")
 
     def _ncm_sample_rate(self) -> Optional[int]:
         return converter.normalize_sample_rate(self.ncm_rate_var.get())
@@ -1165,7 +1275,16 @@ class App(ctk.CTk):
             converter.resample_in_place(raw, sample_rate, ffmpeg=self.ffmpeg)
             return raw
         out_dir = os.path.dirname(os.path.abspath(raw)) or "."
+        # raw 是刚解密出来的文件,同名目标在磁盘上已存在,必须避开它。
         final = converter.build_output_path(raw, out_dir, fmt)
+        if os.path.normcase(os.path.abspath(final)) == os.path.normcase(os.path.abspath(raw)):
+            i = 1
+            while True:
+                candidate = os.path.join(out_dir, f"{os.path.splitext(os.path.basename(raw))[0]}_{i}.{fmt}")
+                if not os.path.exists(candidate):
+                    final = candidate
+                    break
+                i += 1
         try:
             converter.convert_file(
                 raw, final, fmt,
@@ -1206,10 +1325,15 @@ class App(ctk.CTk):
                 step = (lambda p: on_progress(p * 0.5)) if turning else on_progress
                 if isinstance(task, ncm_decrypt.NcmTask):
                     raw, meta = ncm_decrypt.decrypt_file(
-                        task.src, task.dst, on_progress=step, ffmpeg=self.ffmpeg)
+                        task.src, task.dst, on_progress=step, ffmpeg=self.ffmpeg,
+                        on_line=lambda line: self.ui_queue.put(("log", line)),
+                        rename_by_meta=self.rename_by_meta,
+                    )
                 else:
                     raw, meta = qmc_decrypt.decrypt_file(
-                        task.src, task.dst, on_progress=step)
+                        task.src, task.dst, on_progress=step,
+                        rename_by_meta=self.rename_by_meta,
+                    )
                 dst = raw
                 if turning:
                     task.status = "转码中…"
@@ -1217,7 +1341,16 @@ class App(ctk.CTk):
                     dst = self._transcode_decrypted(
                         raw, target_fmt, on_progress, sample_rate=sample_rate
                     )
-                    task.dst = dst
+                # 解密产物缺少标签时,尝试用声学指纹联网补全(可关闭)。
+                if self.fingerprint_enabled and not (
+                    getattr(meta, "music_name", "") and getattr(meta, "artist", "")
+                ):
+                    task.status = "识别中…"
+                    self.ui_queue.put(("ncm_refresh", task))
+                    dst = self._identify_and_rewrite(task, dst, on_progress)
+                if self.rename_by_meta:
+                    dst = self._rename_decrypted(dst, meta)
+                task.dst = dst
                 task.status = "完成"
                 task.set_progress(100.0)
                 self.ui_queue.put(("ncm_refresh", task))
@@ -1230,6 +1363,95 @@ class App(ctk.CTk):
                 self.ui_queue.put(("log", f"✗ 解密失败: {task.src} -> {e}"))
             self.ui_queue.put(("ncm_total", (i + 1, total)))
             self._end_job("ncm")
+
+    def _identify_and_rewrite(self, task, path: str, on_progress) -> str:
+        """对缺标签的解密产物做指纹识别,补写标签并按需下载封面。
+
+        任何一步失败都只记录日志,绝不中断解密主流程。
+        """
+        def log(msg: str):
+            self.ui_queue.put(("log", msg))
+
+        try:
+            match = fingerprint.identify(
+                path,
+                self.fingerprint_key,
+                on_line=lambda m: log(f"  指纹识别 · {os.path.basename(path)} · {m}"),
+            )
+        except fingerprint.MissingBackend as e:
+            log(f"⚠ 跳过指纹识别: {e}")
+            return path
+        except fingerprint.MissingApiKey as e:
+            log(f"⚠ 跳过指纹识别: {e}")
+            return path
+        except fingerprint.FingerprintError as e:
+            log(f"⚠ 指纹识别失败: {e}")
+            return path
+        except Exception as e:  # noqa: BLE001 - 识别永远不能影响解密产物
+            log(f"⚠ 指纹识别异常: {e}")
+            return path
+
+        if not match.found:
+            log(f"· 未匹配到歌曲: {os.path.basename(path)}"
+                f"(AcoustID 对 QQ 音乐等中文曲库覆盖有限,属正常)")
+            return path
+
+        log(f"✓ 已识别: {match.artist} - {match.title}"
+            + (f" · 匹配度 {match.score:.0%}" if match.score else ""))
+
+        if getattr(task, "meta", None) is not None:
+            task.meta.music_name = match.title or getattr(task.meta, "music_name", "")
+            task.meta.artist = match.artist or getattr(task.meta, "artist", "")
+            task.meta.album = match.album or getattr(task.meta, "album", "")
+
+        cover = b""
+        if match.cover_url:
+            cover = fingerprint.download_cover(match.cover_url)
+        new_path = self._apply_identified_tags(path, match, cover)
+        return new_path
+
+    def _apply_identified_tags(self, path: str, match, cover: bytes) -> str:
+        """把识别结果写回音频文件;失败保留原文件。"""
+        ext = os.path.splitext(path)[1].lstrip(".").lower()
+        try:
+            changed = qmc_decrypt.write_basic_tags(
+                path, title=match.title, artist=match.artist, album=match.album
+            )
+            if cover and ext in converter.PICTURE_CAPABLE_FORMATS:
+                converter.attach_picture(path, cover, ext)
+                self.ui_queue.put(("log", "  已写入封面"))
+            if changed:
+                self.ui_queue.put(("log", "  已写入标签"))
+            elif not cover:
+                self.ui_queue.put(("log", "  标签已存在,无需覆盖"))
+        except Exception as e:  # noqa: BLE001
+            self.ui_queue.put(("log", f"⚠ 写入识别结果失败: {e}"))
+        return path
+
+    def _rename_decrypted(self, path: str, meta) -> str:
+        """按"歌手 - 歌名"重命名;取不到歌名则维持原文件名。"""
+        artist = str(getattr(meta, "artist", "") or "")
+        title = str(getattr(meta, "music_name", "") or "")
+        target = qmc_decrypt.build_track_filename(
+            artist, title, os.path.splitext(path)[1], os.path.dirname(path)
+        )
+        if not target:
+            self.ui_queue.put(
+                ("log", f"· 无法重命名(无歌名),维持: {os.path.basename(path)}")
+            )
+            return path
+        try:
+            if os.path.normcase(os.path.abspath(target)) != os.path.normcase(
+                os.path.abspath(path)
+            ):
+                os.replace(path, target)
+                self.ui_queue.put(
+                    ("log", f"  已重命名 → {os.path.basename(target)}")
+                )
+                return target
+        except OSError as e:
+            self.ui_queue.put(("log", f"⚠ 重命名失败: {e}"))
+        return path
 
     # ---------- Apple Music / Beatport 下载 ----------
     def _build_premium_tab(self, parent):
@@ -1697,6 +1919,11 @@ class App(ctk.CTk):
             title="选择音频文件",
             filetypes=[("音频文件", "*.mp3 *.wav *.flac *.m4a *.aac *.ogg *.opus *.wma *.aiff *.aif *.ape *.alac"), ("所有文件", "*.*")],
         )
+        # 同批次不同来源可能同名(如 A/song.mp3 与 B/song.mp3),必须去重,
+        # 否则后一个任务会静默覆盖前一个的结果。
+        reserved: set[str] = {
+            os.path.normcase(os.path.abspath(t.dst)) for t in self.cv_tasks if t.dst
+        }
         for f in files:
             if not converter.is_supported(f):
                 messagebox.showwarning("提示", f"不支持的格式: {f}")
@@ -1704,7 +1931,9 @@ class App(ctk.CTk):
             if any(t.src == f for t in self.cv_tasks):
                 continue
             fmt = self.cv_fmt_var.get()
-            dst = converter.build_output_path(f, self.cv_out_var.get().strip() or self.default_out_dir, fmt)
+            dst = converter.build_output_path(
+                f, self.cv_out_var.get().strip() or self.default_out_dir, fmt, reserved
+            )
             task = converter.ConvertTask(src=f, dst=dst, fmt=fmt)
             self.cv_tasks.append(task)
             self._add_cv_row(task)

@@ -101,13 +101,10 @@ class TableCoverageTests(unittest.TestCase):
 
 
 class BilingualStartupTests(unittest.TestCase):
-    """英文模式下界面必须能正常构建（下拉框取值曾误用翻译后的标签而崩溃）。"""
+    """英文模式下界面必须能正常构建（下拉框取值曾误用翻译后的标签而崩溃）。
 
-    def setUp(self):
-        self._original = i18n.current_language()
-
-    def tearDown(self):
-        i18n.set_language(self._original)
+    同时覆盖四个页面的采样率下拉框回调与两个开关，确保不抛异常、不弹模态框。
+    """
 
     @staticmethod
     def _tk_available() -> bool:
@@ -119,6 +116,100 @@ class BilingualStartupTests(unittest.TestCase):
             return True
         except Exception:  # noqa: BLE001 - 无显示环境时跳过
             return False
+
+    def setUp(self):
+        if not self._tk_available():
+            self.skipTest("当前环境没有可用的 Tk 显示")
+        self._original = i18n.current_language()
+
+    def _run_smoke(self):
+        from tkinter import messagebox
+
+        popped = []
+        orig_warn = messagebox.showwarning
+        orig_info = messagebox.showinfo
+        messagebox.showwarning = lambda *a, **k: popped.append(a[0] if a else "")
+        messagebox.showinfo = lambda *a, **k: popped.append(a[0] if a else "")
+        try:
+            import main as app_main
+
+            app = app_main.App()
+            try:
+                app.update()
+                # 逐个切换所有 tab，强制渲染
+                for key in app.tabs._segmented_button._buttons_dict:
+                    app.tabs.set(key)
+                    app.update_idletasks()
+                # 四个页面的采样率回调都必须把值回写
+                for handler, var in (
+                    (app._on_cv_rate_change, app.cv_rate_var),
+                    (app._on_dl_rate_change, app.dl_rate_var),
+                    (app._on_va_rate_change, app.va_rate_var),
+                    (app._on_ncm_rate_change, app.ncm_rate_var),
+                ):
+                    handler("44100 Hz (CD)")
+                    app.update_idletasks()
+                    self.assertEqual(var.get(), "44100")
+                # 提示文案应随选择更新
+                self.assertIn("44100", app.cv_rate_hint.cget("text"))
+                # 两个开关来回切换
+                app.rename_var.set(False)
+                app._on_rename_toggle()
+                self.assertFalse(app.rename_by_meta)
+                app.rename_var.set(True)
+                app._on_rename_toggle()
+                self.assertTrue(app.rename_by_meta)
+            finally:
+                app._closing = True
+                app.destroy()
+            return popped
+        finally:
+            messagebox.showwarning = orig_warn
+            messagebox.showinfo = orig_info
+
+    def test_smoke_no_crash(self):
+        for lang in (i18n.ZH, i18n.EN):
+            i18n.set_language(lang)
+            self._run_smoke()
+
+    def test_fingerprint_toggle_does_not_pop_modal(self):
+        """指纹开关缺前置条件时只写日志,不能弹模态框打断操作。"""
+        i18n.set_language(i18n.ZH)
+        popped = self._run_smoke_toggle()
+        self.assertEqual(
+            popped, [],
+            f"开关切换不应弹出模态对话框,实际弹出: {popped}",
+        )
+
+    def _run_smoke_toggle(self):
+        from tkinter import messagebox
+
+        popped = []
+        orig_warn = messagebox.showwarning
+        messagebox.showwarning = lambda *a, **k: popped.append(a[0] if a else "")
+        try:
+            import main as app_main
+
+            app = app_main.App()
+            try:
+                app.update()
+                app.fp_var.set(True)
+                app._on_fingerprint_toggle()
+                app.update_idletasks()
+                self.assertTrue(app.fingerprint_enabled)
+                app.fp_var.set(False)
+                app._on_fingerprint_toggle()
+                app.update_idletasks()
+                self.assertFalse(app.fingerprint_enabled)
+            finally:
+                app._closing = True
+                app.destroy()
+            return popped
+        finally:
+            messagebox.showwarning = orig_warn
+
+    def tearDown(self):
+        i18n.set_language(self._original)
 
     def _build_app(self):
         if not self._tk_available():
