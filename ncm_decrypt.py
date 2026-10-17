@@ -45,6 +45,7 @@ class NcmMeta:
     duration: int = 0
     format: str = ""  # 原始内嵌格式: flac / mp3
     raw_json: dict = field(default_factory=dict)
+    cover: bytes = field(default=b"", repr=False)  # 封面原始字节,供后续一次写入复用
 
     @property
     def album_artist(self) -> str:
@@ -420,36 +421,42 @@ def detect_audio_format(audio: bytes) -> str:
     return "flac"  # 默认 flac
 
 
+def meta_tags(meta: NcmMeta, identifier: str = "") -> dict[str, str]:
+    """把 NCM 元数据整理成 FLAC / FFmpeg 都能用的标签字典。"""
+    tags: dict[str, str] = {}
+    if meta.music_name:
+        tags["title"] = meta.music_name
+    if meta.artist:
+        tags["artist"] = meta.artist
+    if meta.album:
+        tags["album"] = meta.album
+    album_artist = meta.album_artist
+    if album_artist:
+        tags["albumartist"] = album_artist
+    date = meta.publish_date
+    if date:
+        tags["date"] = date
+    track = meta.track_number
+    if track:
+        tags["tracknumber"] = track
+    disc = meta.disc_number
+    if disc:
+        tags["discnumber"] = disc
+    genre = meta.genre
+    if genre:
+        tags["genre"] = genre
+    if identifier:
+        tags["comment"] = identifier
+    return tags
+
+
 def write_flac_meta(path: str, meta: NcmMeta, cover: bytes, identifier: str = "") -> None:
     """向 FLAC 写入标题/艺术家/专辑/曲号/日期/流派/封面。"""
     from mutagen.flac import FLAC, Picture
 
     audio = FLAC(path)
-    if meta.music_name:
-        audio["title"] = meta.music_name
-    if meta.artist:
-        audio["artist"] = meta.artist
-    if meta.album:
-        audio["album"] = meta.album
-
-    album_artist = meta.album_artist
-    if album_artist:
-        audio["albumartist"] = album_artist
-    date = meta.publish_date
-    if date:
-        audio["date"] = date
-    track = meta.track_number
-    if track:
-        audio["tracknumber"] = track
-    disc = meta.disc_number
-    if disc:
-        audio["discnumber"] = disc
-    genre = meta.genre
-    if genre:
-        audio["genre"] = genre
-
-    if identifier:
-        audio["comment"] = identifier
+    for key, value in meta_tags(meta, identifier).items():
+        audio[key] = value
     if cover:
         pic = Picture()
         pic.type = 3  # front cover
@@ -466,6 +473,7 @@ def decrypt_file(
     on_line: Optional[Callable[[str], None]] = None,
     ffmpeg: Optional[str] = None,
     rename_by_meta: bool = False,
+    write_meta: bool = True,
 ) -> tuple[str, NcmMeta]:
     """解密单个 .ncm 文件,输出 FLAC(若内嵌为 MP3 则用 ffmpeg 转 FLAC)。
 
@@ -473,6 +481,9 @@ def decrypt_file(
 
     rename_by_meta=True 时,若能从元数据取到歌名,会把输出重命名为
     "歌手 - 歌名.flac"。
+
+    write_meta=False 时不写标签/封面,把封面留在 ``meta.cover`` 里,
+    供调用方在重采样时一次写入,避免多跑一遍整文件 I/O。
     """
     if not os.path.exists(src):
         raise NcmError(f"文件不存在: {src}")
@@ -530,14 +541,16 @@ def decrypt_file(
             on_progress(80.0)
 
         # 写元数据与封面
+        meta.cover = cover or b""
         identifier = ""
         if meta.music_name:
             identifier = f"{meta.music_name} - {meta.artist}".strip(" -")
-        try:
-            write_flac_meta(temp_dst, meta, cover, identifier)
-        except Exception as e:  # noqa: BLE001 - 元数据写入失败不致命
-            if on_line:
-                on_line(f"警告: 元数据写入失败: {e}")
+        if write_meta:
+            try:
+                write_flac_meta(temp_dst, meta, cover, identifier)
+            except Exception as e:  # noqa: BLE001 - 元数据写入失败不致命
+                if on_line:
+                    on_line(f"警告: 元数据写入失败: {e}")
 
         os.replace(temp_dst, dst)
     finally:

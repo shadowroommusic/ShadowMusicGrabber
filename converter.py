@@ -508,15 +508,41 @@ def _probe_audio_codec(path: str, ffmpeg: str) -> tuple[str, str]:
     return "", ""
 
 
+def _probe_sample_rate(path: str, ffmpeg: str) -> int:
+    """读取音频流的采样率；失败返回 0。"""
+    ffprobe = find_ffprobe(ffmpeg)
+    if not ffprobe:
+        return 0
+    try:
+        out = subprocess.run(
+            [
+                ffprobe, "-v", "quiet", "-select_streams", "a:0",
+                "-show_entries", "stream=sample_rate", "-of", "csv=p=0", path,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        ).stdout.strip().splitlines()
+        return int(out[0]) if out and out[0].strip().isdigit() else 0
+    except Exception:  # noqa: BLE001 - 探测失败时继续走重写路径
+        return 0
+
+
 def resample_in_place(
     path: str,
     sample_rate: int,
     ffmpeg: Optional[str] = None,
+    metadata: Optional[dict[str, str]] = None,
+    cover: Optional[bytes] = None,
 ) -> str:
     """保持原音频容器与编码族,只把采样率重采样到 sample_rate,原子替换原文件。
 
     用于"原格式 + 指定采样率"的场景:例如下载到的 m4a/opus 保持原编码,
     仅重采样。返回最终路径(成功时与入参相同)。
+
+    metadata / cover 会在同一次 ffmpeg 里写入,避免再跑一次 mutagen 全文件
+    重写——对 USB / 机械盘来说这是成倍的 I/O 节省。
     """
     rate = normalize_sample_rate(sample_rate)
     if not rate:
@@ -529,6 +555,11 @@ def resample_in_place(
     if not ffmpeg_exe:
         raise ConvertError("未找到 ffmpeg,请先安装并加入 PATH")
 
+    current_rate = _probe_sample_rate(path, ffmpeg_exe)
+    if current_rate == rate and not metadata and not cover:
+        # 已经是目标采样率: 不重写文件, 省掉一次整文件 I/O。
+        return path
+
     ext = os.path.splitext(path)[1] or ".tmp"
     dst_dir = os.path.dirname(path) or "."
     fd, temp_path = tempfile.mkstemp(
@@ -540,21 +571,39 @@ def resample_in_place(
     except OSError:
         pass
 
-    # 改变采样率必须重新编码:-c copy 流拷贝时 ffmpeg 会拒绝重采样。
-    codec_args = _resample_encoder_args(*_probe_audio_codec(path, ffmpeg_exe))
-    # 同 convert_file:-map 0:a:0 -vn 会丢掉内嵌封面,先抠出来转码后写回。
-    cover = extract_picture(path)
+    if current_rate == rate:
+        # 采样率不变时只写标签/封面, 流拷贝即可, 不重新编码。
+        codec_args = ["-c:a", "copy"]
+    else:
+        # 改变采样率必须重新编码:-c copy 流拷贝时 ffmpeg 会拒绝重采样。
+        codec_args = _resample_encoder_args(*_probe_audio_codec(path, ffmpeg_exe))
+
     out_fmt = os.path.splitext(path)[1].lstrip(".").lower()
-    cmd = [
-        ffmpeg_exe, "-hide_banner", "-nostdin", "-y",
-        "-i", path,
-        "-map", "0:a:0",
+    cover_path: Optional[str] = None
+    cmd = [ffmpeg_exe, "-hide_banner", "-nostdin", "-y", "-i", path]
+    if cover:
+        suffix = ".png" if cover[:4] == b"\x89PNG" else ".jpg"
+        fd, cover_path = tempfile.mkstemp(prefix=".cover.", suffix=suffix)
+        os.close(fd)
+        with open(cover_path, "wb") as fh:
+            fh.write(cover)
+        cmd += ["-i", cover_path]
+        cmd += ["-map", "0:a:0", "-map", "1:v?"]
+    else:
+        # 保留源文件里已有的 attached_pic(封面), 不丢封面。
+        cmd += ["-map", "0:a:0", "-map", "0:v?"]
+    cmd += [
+        "-c:v", "copy", "-disposition:v", "attached_pic",
         "-map_metadata", "0",
-        "-vn",
         *codec_args,
-        "-ar", str(rate),
-        temp_path,
     ]
+    if current_rate != rate:
+        cmd += ["-ar", str(rate)]
+    for key, value in (metadata or {}).items():
+        if value:
+            cmd += ["-metadata", f"{key}={value}"]
+    cmd.append(temp_path)
+
     try:
         proc = subprocess.run(
             cmd,
@@ -571,13 +620,25 @@ def resample_in_place(
             raise ConvertError(f"重采样失败 (ffmpeg {proc.returncode}): {detail}")
         if not os.path.isfile(temp_path) or os.path.getsize(temp_path) <= 0:
             raise ConvertError("重采样后未生成有效输出文件")
-        if cover:
-            attach_picture(temp_path, cover, out_fmt)
+        if cover and out_fmt == "flac":
+            # 极端情况下 ffmpeg 没把封面写进 FLAC, 再用 mutagen 补一次。
+            try:
+                from mutagen.flac import FLAC
+
+                if not FLAC(temp_path).pictures:
+                    attach_picture(temp_path, cover, out_fmt)
+            except Exception:  # noqa: BLE001 - 封面失败不影响音频
+                pass
         os.replace(temp_path, path)
     finally:
         if os.path.exists(temp_path):
             try:
                 os.remove(temp_path)
+            except OSError:
+                pass
+        if cover_path and os.path.exists(cover_path):
+            try:
+                os.remove(cover_path)
             except OSError:
                 pass
     return path
@@ -589,6 +650,8 @@ def finalize_decrypted(
     sample_rate: Optional[int] = None,
     ffmpeg: Optional[str] = None,
     on_progress: Optional[Callable[[float], None]] = None,
+    metadata: Optional[dict[str, str]] = None,
+    cover: Optional[bytes] = None,
 ) -> str:
     """把解密产物落到目标格式。
 
@@ -600,14 +663,18 @@ def finalize_decrypted(
     """
     raw = os.path.abspath(os.fspath(raw))
     if fmt == "original":
-        if sample_rate:
-            resample_in_place(raw, sample_rate, ffmpeg=ffmpeg)
+        if sample_rate or metadata or cover:
+            resample_in_place(
+                raw, sample_rate, ffmpeg=ffmpeg, metadata=metadata, cover=cover
+            )
         return raw
 
     current = os.path.splitext(raw)[1].lstrip(".").lower()
     if current == fmt:
-        if sample_rate:
-            resample_in_place(raw, sample_rate, ffmpeg=ffmpeg)
+        if sample_rate or metadata or cover:
+            resample_in_place(
+                raw, sample_rate, ffmpeg=ffmpeg, metadata=metadata, cover=cover
+            )
         return raw
 
     out_dir = os.path.dirname(raw) or "."

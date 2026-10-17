@@ -55,6 +55,35 @@ def _sample_rate(path: str) -> int:
     return int(proc.stdout.strip())
 
 
+def _make_flac(path: str, rate: int = 44100) -> None:
+    ffmpeg = converter.find_ffmpeg()
+    if not ffmpeg:
+        raise unittest.SkipTest("ffmpeg not available")
+    proc = _run(
+        [
+            ffmpeg, "-hide_banner", "-nostdin", "-y",
+            "-f", "lavfi",
+            "-i", f"sine=frequency=440:duration=1:sample_rate={rate}",
+            "-c:a", "flac", path,
+        ]
+    )
+    if proc.returncode != 0:
+        raise unittest.SkipTest(f"cannot generate flac: {proc.stderr[-200:]}")
+
+
+def _make_png(path: str) -> None:
+    ffmpeg = converter.find_ffmpeg()
+    proc = _run(
+        [
+            ffmpeg, "-hide_banner", "-nostdin", "-y",
+            "-f", "lavfi", "-i", "color=c=red:s=64x64:d=1",
+            "-frames:v", "1", path,
+        ]
+    )
+    if proc.returncode != 0:
+        raise unittest.SkipTest(f"cannot generate png: {proc.stderr[-200:]}")
+
+
 class FinalizeDecryptedTests(unittest.TestCase):
     def setUp(self):
         self._td = tempfile.TemporaryDirectory()
@@ -97,3 +126,37 @@ class FinalizeDecryptedTests(unittest.TestCase):
         self.assertTrue(out.endswith(".flac"))
         self.assertTrue(os.path.exists(out))
         self.assertFalse(os.path.exists(src))
+
+    def test_resample_writes_metadata_and_cover_in_one_pass(self):
+        src = os.path.join(self.dir, "song.flac")
+        _make_flac(src, 44100)
+        cover_path = os.path.join(self.dir, "cover.png")
+        _make_png(cover_path)
+        with open(cover_path, "rb") as fh:
+            cover = fh.read()
+
+        converter.resample_in_place(
+            src,
+            48000,
+            ffmpeg=self.ffmpeg,
+            metadata={"title": "T", "artist": "A"},
+            cover=cover,
+        )
+
+        from mutagen.flac import FLAC
+
+        audio = FLAC(src)
+        self.assertEqual(audio.info.sample_rate, 48000)
+        self.assertEqual(audio["title"], ["T"])
+        self.assertEqual(audio["artist"], ["A"])
+        self.assertEqual(len(audio.pictures), 1)
+
+    def test_resample_skips_when_rate_already_matches(self):
+        src = os.path.join(self.dir, "song.flac")
+        _make_flac(src, 44100)
+        before = os.path.getmtime(src)
+
+        out = converter.resample_in_place(src, 44100, ffmpeg=self.ffmpeg)
+
+        self.assertEqual(out, src)
+        self.assertEqual(os.path.getmtime(src), before)

@@ -32,7 +32,7 @@ import qmc_decrypt
 import updater
 
 APP_NAME = "Shadow MusicGrabber"
-APP_VERSION = "1.12.1"
+APP_VERSION = "1.12.2"
 
 # 日志文件: 用户遇到卡顿/失败时可以直接回传这个文件定位问题。
 LOG_DIR = os.path.join(
@@ -1309,7 +1309,7 @@ class App(ctk.CTk):
             self._job_remaining.pop("ncm", None)
             raise
 
-    def _transcode_decrypted(self, raw: str, fmt: str, on_progress, sample_rate=None) -> str:
+    def _transcode_decrypted(self, raw: str, fmt: str, on_progress, sample_rate=None, metadata=None, cover=None) -> str:
         """把解密结果落到目标格式; fmt="original" 时只按需重采样,绝不转码。"""
         return converter.finalize_decrypted(
             raw,
@@ -1317,6 +1317,8 @@ class App(ctk.CTk):
             sample_rate=sample_rate,
             ffmpeg=self.ffmpeg,
             on_progress=on_progress,
+            metadata=metadata,
+            cover=cover,
         )
 
     def _ncm_worker(self, tasks: list, target_fmt: str = "original", sample_rate=None):
@@ -1334,27 +1336,58 @@ class App(ctk.CTk):
                     self.ui_queue.put(("ncm_progress", task))
 
             try:
+                t_start = time.perf_counter()
                 # 需要重采样时,解密阶段只占进度条前 50%。
                 turning = target_fmt != "original" or bool(sample_rate)
                 step = (lambda p: on_progress(p * 0.5)) if turning else on_progress
+                # 原格式 + 重采样时,把标签/封面推迟到 ffmpeg 的那一次写入,
+                # 少跑一遍整文件重写(USB/机械盘上这一遍很贵)。
+                defer_meta = (
+                    isinstance(task, ncm_decrypt.NcmTask)
+                    and target_fmt == "original"
+                    and bool(sample_rate)
+                )
                 if isinstance(task, ncm_decrypt.NcmTask):
                     raw, meta = ncm_decrypt.decrypt_file(
                         task.src, task.dst, on_progress=step, ffmpeg=self.ffmpeg,
                         on_line=lambda line: self.ui_queue.put(("log", line)),
                         rename_by_meta=self.rename_by_meta,
+                        write_meta=not defer_meta,
                     )
                 else:
                     raw, meta = qmc_decrypt.decrypt_file(
                         task.src, task.dst, on_progress=step,
                         rename_by_meta=self.rename_by_meta,
                     )
+                t_decrypted = time.perf_counter()
                 dst = raw
                 if turning:
                     task.status = "转码中…"
                     self.ui_queue.put(("ncm_refresh", task))
-                    dst = self._transcode_decrypted(
-                        raw, target_fmt, on_progress, sample_rate=sample_rate
-                    )
+                    metadata = None
+                    cover = None
+                    identifier = ""
+                    if defer_meta:
+                        if meta.music_name:
+                            identifier = f"{meta.music_name} - {meta.artist}".strip(" -")
+                        metadata = ncm_decrypt.meta_tags(meta, identifier)
+                        cover = getattr(meta, "cover", b"") or None
+                    try:
+                        dst = self._transcode_decrypted(
+                            raw, target_fmt, on_progress, sample_rate=sample_rate,
+                            metadata=metadata, cover=cover,
+                        )
+                    except Exception:
+                        if defer_meta:
+                            # 转码失败也要把已经解密出来的 FLAC 补上标签。
+                            try:
+                                ncm_decrypt.write_flac_meta(
+                                    raw, meta, getattr(meta, "cover", b""), identifier
+                                )
+                            except Exception:  # noqa: BLE001 - 补标签失败不影响抛错
+                                pass
+                        raise
+                t_transcoded = time.perf_counter()
                 # 解密产物缺少标签时,尝试用声学指纹联网补全(可关闭)。
                 if self.fingerprint_enabled and not (
                     getattr(meta, "music_name", "") and getattr(meta, "artist", "")
@@ -1370,6 +1403,13 @@ class App(ctk.CTk):
                 self.ui_queue.put(("ncm_refresh", task))
                 name = getattr(meta, "music_name", "") or os.path.basename(dst)
                 self.ui_queue.put(("log", f"✓ 解密完成: {name} -> {dst}"))
+                log.info(
+                    "timing %s decrypt=%.2fs transcode=%.2fs total=%.2fs",
+                    os.path.basename(task.src),
+                    t_decrypted - t_start,
+                    t_transcoded - t_decrypted,
+                    time.perf_counter() - t_start,
+                )
             except Exception as e:
                 task.status = "失败"
                 task.error = str(e)
@@ -2169,7 +2209,7 @@ class App(ctk.CTk):
         if label is not None:
             label.configure(text=text)
 
-    def _create_ncm_rows_in_batches(self, tasks: list, batch: int = 40) -> None:
+    def _create_ncm_rows_in_batches(self, tasks: list, batch: int = 12) -> None:
         """分批创建任务行: 一次几百个控件会把主线程卡住。"""
         chunk, rest = tasks[:batch], tasks[batch:]
         for task in chunk:
