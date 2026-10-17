@@ -583,6 +583,70 @@ def resample_in_place(
     return path
 
 
+def finalize_decrypted(
+    raw: str,
+    fmt: str,
+    sample_rate: Optional[int] = None,
+    ffmpeg: Optional[str] = None,
+    on_progress: Optional[Callable[[float], None]] = None,
+) -> str:
+    """把解密产物落到目标格式。
+
+    ``fmt == "original"`` 表示保持解密得到的原始格式：只按需重采样，
+    绝不转码——"original" 不是 ffmpeg 的输出格式，不能往下传。
+
+    其他格式会转码到同目录下的新文件，成功后才删除原始解密产物；
+    转码失败时保留原始文件，避免用户拿不到已经解密出来的音频。
+    """
+    raw = os.path.abspath(os.fspath(raw))
+    if fmt == "original":
+        if sample_rate:
+            resample_in_place(raw, sample_rate, ffmpeg=ffmpeg)
+        return raw
+
+    current = os.path.splitext(raw)[1].lstrip(".").lower()
+    if current == fmt:
+        if sample_rate:
+            resample_in_place(raw, sample_rate, ffmpeg=ffmpeg)
+        return raw
+
+    out_dir = os.path.dirname(raw) or "."
+    final = build_output_path(raw, out_dir, fmt)
+    if os.path.normcase(os.path.abspath(final)) == os.path.normcase(raw):
+        i = 1
+        while True:
+            candidate = os.path.join(
+                out_dir, f"{os.path.splitext(os.path.basename(raw))[0]}_{i}.{fmt}"
+            )
+            if not os.path.exists(candidate):
+                final = candidate
+                break
+            i += 1
+    try:
+        convert_file(
+            raw,
+            final,
+            fmt,
+            on_progress=(
+                (lambda p: on_progress(50.0 + p * 0.5)) if on_progress else None
+            ),
+            ffmpeg=ffmpeg,
+            sample_rate=sample_rate,
+        )
+    except Exception:
+        if os.path.exists(final):
+            try:
+                os.remove(final)
+            except OSError:
+                pass
+        raise
+    try:
+        os.remove(raw)
+    except OSError:
+        pass
+    return final
+
+
 def _probe_duration(path: str, ffmpeg: str) -> float:
     """用 ffprobe(或 ffmpeg)获取时长,失败返回 0。"""
     import json

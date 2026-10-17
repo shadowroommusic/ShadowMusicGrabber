@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import queue
 import subprocess
@@ -14,6 +15,7 @@ import sys
 import threading
 import time
 import tkinter as tk
+from logging.handlers import RotatingFileHandler
 from tkinter import filedialog, messagebox
 from typing import Optional
 
@@ -30,7 +32,39 @@ import qmc_decrypt
 import updater
 
 APP_NAME = "Shadow MusicGrabber"
-APP_VERSION = "1.12.0"
+APP_VERSION = "1.12.1"
+
+# 日志文件: 用户遇到卡顿/失败时可以直接回传这个文件定位问题。
+LOG_DIR = os.path.join(
+    os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"),
+    "ShadowMusicGrabber",
+    "logs",
+)
+LOG_PATH = os.path.join(LOG_DIR, "app.log")
+
+
+def _setup_logging() -> logging.Logger:
+    """把界面日志与未捕获异常写入可回传的日志文件。"""
+    logger = logging.getLogger("shadowmusicgrabber")
+    if logger.handlers:
+        return logger
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+    try:
+        os.makedirs(LOG_DIR, exist_ok=True)
+        handler = RotatingFileHandler(
+            LOG_PATH, maxBytes=2 * 1024 * 1024, backupCount=3, encoding="utf-8"
+        )
+        handler.setFormatter(
+            logging.Formatter("%(asctime)s %(levelname)s [%(threadName)s] %(message)s")
+        )
+        logger.addHandler(handler)
+    except OSError:
+        pass
+    return logger
+
+
+log = _setup_logging()
 
 # 界面语言：先读已保存的设置，否则按系统语言；控件在构造时由 i18n 统一翻译。
 i18n.install()
@@ -170,8 +204,15 @@ class App(ctk.CTk):
         self.fingerprint_enabled = False
         self.fingerprint_key = ""
 
+        log.info(
+            "start v%s | ffmpeg=%s | log=%s",
+            APP_VERSION,
+            self.ffmpeg or "-",
+            LOG_PATH,
+        )
+
         self._build_ui()
-        self.after(100, self._drain_ui_queue)
+        self.after(30, self._drain_ui_queue)
         self._log(f"就绪。ffmpeg: {self.ffmpeg or '未找到(转码将不可用)'}")
         self._log("提示:仅处理你拥有或明确获授权的内容;不绕过 DRM、订阅、地区或访问限制。")
 
@@ -313,6 +354,14 @@ class App(ctk.CTk):
             messagebox.showerror("无法打开目录", f"{i18n.tr(purpose)}目录打开失败:\n{path}\n\n{exc}")
             self._log(f"✗ 无法打开{i18n.tr(purpose)}目录: {path} -> {exc}")
 
+    def _open_log_folder(self):
+        """打开日志目录, 方便用户回传 app.log。"""
+        try:
+            os.makedirs(LOG_DIR, exist_ok=True)
+            os.startfile(LOG_DIR)  # type: ignore[attr-defined]
+        except OSError as exc:
+            messagebox.showerror("无法打开日志目录", f"{LOG_DIR}\n\n{exc}")
+
     def _require_idle(self, name: str, label: str) -> bool:
         if name not in self._running_jobs:
             return True
@@ -358,6 +407,8 @@ class App(ctk.CTk):
         # 更新入口: 版本号 + 状态 + 检查更新按钮(更新源固定为本项目仓库)
         self.update_btn = self._button(header, "检查更新", self._check_updates, width=96)
         self.update_btn.pack(side="right")
+        self.log_btn = self._button(header, "日志", self._open_log_folder, width=64)
+        self.log_btn.pack(side="right", padx=(0, 8))
         self.lang_btn = self._button(header, i18n.toggle_label(), self._toggle_language, width=84)
         self.lang_btn.pack(side="right", padx=(0, 8))
         self.update_status_lbl = ctk.CTkLabel(
@@ -1259,51 +1310,14 @@ class App(ctk.CTk):
             raise
 
     def _transcode_decrypted(self, raw: str, fmt: str, on_progress, sample_rate=None) -> str:
-        """把解密结果转成目标格式；已经是指定格式时原样返回。
-
-        中间文件只在转码成功后才删除，所以即使转码失败，
-        用户仍能在输出目录拿到解密结果。
-
-        sample_rate 指定输出采样率；给了采样率时，即使解密结果已经是目标
-        扩展名也要重采样一遍(例如 .flac 解密结果统一到 48 kHz)。
-        """
-        current = os.path.splitext(raw)[1].lstrip(".").lower()
-        if current == fmt:
-            # 已经是目标格式:仅在指定了采样率时做原地重采样,不改文件名。
-            if not sample_rate:
-                return raw
-            converter.resample_in_place(raw, sample_rate, ffmpeg=self.ffmpeg)
-            return raw
-        out_dir = os.path.dirname(os.path.abspath(raw)) or "."
-        # raw 是刚解密出来的文件,同名目标在磁盘上已存在,必须避开它。
-        final = converter.build_output_path(raw, out_dir, fmt)
-        if os.path.normcase(os.path.abspath(final)) == os.path.normcase(os.path.abspath(raw)):
-            i = 1
-            while True:
-                candidate = os.path.join(out_dir, f"{os.path.splitext(os.path.basename(raw))[0]}_{i}.{fmt}")
-                if not os.path.exists(candidate):
-                    final = candidate
-                    break
-                i += 1
-        try:
-            converter.convert_file(
-                raw, final, fmt,
-                on_progress=lambda p: on_progress(50.0 + p * 0.5),
-                ffmpeg=self.ffmpeg,
-                sample_rate=sample_rate,
-            )
-        except Exception:
-            if os.path.exists(final):
-                try:
-                    os.remove(final)
-                except OSError:
-                    pass
-            raise
-        try:
-            os.remove(raw)
-        except OSError:
-            pass
-        return final
+        """把解密结果落到目标格式; fmt="original" 时只按需重采样,绝不转码。"""
+        return converter.finalize_decrypted(
+            raw,
+            fmt,
+            sample_rate=sample_rate,
+            ffmpeg=self.ffmpeg,
+            on_progress=on_progress,
+        )
 
     def _ncm_worker(self, tasks: list, target_fmt: str = "original", sample_rate=None):
         total = len(tasks)
@@ -1359,6 +1373,7 @@ class App(ctk.CTk):
             except Exception as e:
                 task.status = "失败"
                 task.error = str(e)
+                log.exception("decrypt failed: %s", task.src)
                 self.ui_queue.put(("ncm_refresh", task))
                 self.ui_queue.put(("log", f"✗ 解密失败: {task.src} -> {e}"))
             self.ui_queue.put(("ncm_total", (i + 1, total)))
@@ -2178,13 +2193,16 @@ class App(ctk.CTk):
         # enqueue while we render; the next scheduled drain will catch up.
         processed = 0
         max_messages = 400
+        deadline = time.monotonic() + 0.008
+        pending_logs: list[str] = []
         try:
-            while processed < max_messages:
+            while processed < max_messages and time.monotonic() < deadline:
                 msg = self.ui_queue.get_nowait()
                 processed += 1
                 kind = msg[0]
                 if kind == "log":
-                    self._log(msg[1])
+                    pending_logs.append(msg[1])
+                    continue
                 elif kind == "refresh":
                     self._row_for(self.task_row_map, msg[1], "refresh")
                 elif kind == "progress":
@@ -2243,13 +2261,31 @@ class App(ctk.CTk):
                         self._apply_update(msg[1])
         except queue.Empty:
             pass
+        finally:
+            if pending_logs:
+                self._log_many(pending_logs)
         if not self._closing:
-            self.after(100, self._drain_ui_queue)
+            self.after(20, self._drain_ui_queue)
 
     def _log(self, text: str):
-        text = i18n.tr(text)
+        self._log_many([text])
+
+    def _log_many(self, texts: list[str]):
+        """成批写入日志: 一次 insert + 一次 see, 避免大量消息拖死界面。"""
+        if not texts:
+            return
+        for text in texts:
+            log.info("%s", text)
+        joined = "\n".join(i18n.tr(text) for text in texts) + "\n"
         self.log_box.configure(state="normal")
-        self.log_box.insert("end", text + "\n")
+        self.log_box.insert("end", joined)
+        try:
+            lines = int(self.log_box.index("end-1c").split(".")[0])
+            if lines > 5000:
+                # 长时间运行后 Text 控件会越积越慢, 只保留最近的内容。
+                self.log_box.delete("1.0", "1000.0")
+        except (ValueError, IndexError):
+            pass
         self.log_box.see("end")
         self.log_box.configure(state="disabled")
 
@@ -2265,7 +2301,26 @@ class App(ctk.CTk):
         self.destroy()
 
 
+def _install_excepthooks() -> None:
+    """把未捕获异常写进日志, 便于用户回传定位问题。"""
+
+    def _hook(exc_type, exc, tb):
+        log.error("uncaught exception", exc_info=(exc_type, exc, tb))
+        sys.__excepthook__(exc_type, exc, tb)
+
+    def _thread_hook(args):
+        log.error(
+            "uncaught thread exception (%s)",
+            getattr(getattr(args, "thread", None), "name", "?"),
+            exc_info=(args.exc_type, args.exc_value, args.exc_traceback),
+        )
+
+    sys.excepthook = _hook
+    threading.excepthook = _thread_hook
+
+
 def main():
+    _install_excepthooks()
     app = App()
     app.protocol("WM_DELETE_WINDOW", app.on_close)
     app.mainloop()

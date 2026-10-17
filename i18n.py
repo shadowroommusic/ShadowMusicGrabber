@@ -275,6 +275,8 @@ _EN = {
         "This module is already running a task. Wait for it to finish before starting a new one.",
     "无法使用输出目录": "Cannot use the output folder",
     "无法打开目录": "Cannot open the folder",
+    "日志": "Logs",
+    "无法打开日志目录": "Cannot open the log folder",
     "正在运行。请等待当前批次完成后再修改队列。":
         "is running. Wait for the current batch to finish before changing the queue.",
     "请先粘贴至少一个链接": "Paste at least one link first",
