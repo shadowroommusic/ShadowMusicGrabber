@@ -632,15 +632,35 @@ def _transcode_to_flac(
 
 
 def make_output_path(
-    src: str, out_dir: str, reserved_paths: Optional[set[str]] = None
+    src: str,
+    out_dir: str,
+    reserved_paths: Optional[set[str]] = None,
+    avoid_existing: bool = True,
 ) -> str:
-    """构造输出路径: 同名 .flac,避免覆盖或同批次重名。"""
+    """构造输出路径: 同名 .flac。
+
+    avoid_existing=True 时自动加 _1/_2 避开已有文件；
+    False 时用于“跳过 / 覆盖”策略，保留自然文件名。
+    """
     base = os.path.splitext(os.path.basename(src))[0]
     dst = os.path.join(out_dir, base + ".flac")
     reserved_paths = reserved_paths if reserved_paths is not None else set()
     i = 1
-    while os.path.exists(dst) or os.path.normcase(os.path.abspath(dst)) in reserved_paths:
+    while (
+        (avoid_existing and os.path.exists(dst))
+        or os.path.normcase(os.path.abspath(dst)) in reserved_paths
+    ):
         dst = os.path.join(out_dir, f"{base}_{i}.flac")
         i += 1
     reserved_paths.add(os.path.normcase(os.path.abspath(dst)))
     return dst
+
+
+def peek_meta(src: str) -> NcmMeta:
+    """只读取 NCM 头部的元数据，不解密音频（用于“跳过已存在”判断）。"""
+    if not os.path.exists(src):
+        raise NcmError(f"文件不存在: {src}")
+    with open(src, "rb") as fh:
+        size = os.fstat(fh.fileno()).st_size
+        _box, meta, _cover, _offset = _read_ncm_header(fh, size)
+    return meta

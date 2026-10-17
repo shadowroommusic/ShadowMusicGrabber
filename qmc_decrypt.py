@@ -516,6 +516,15 @@ def _safe_filename_component(text: str, fallback: str = "") -> str:
     return name[:120] or fallback
 
 
+def track_filename(artist: str, title: str) -> Optional[str]:
+    """只生成“歌手 - 歌名”文件名主体（不含目录与扩展名），用于查重。"""
+    artist = _safe_filename_component(artist)
+    title = _safe_filename_component(title)
+    if not title:
+        return None
+    return f"{artist} - {title}" if artist else title
+
+
 def build_track_filename(
     artist: str,
     title: str,
@@ -524,11 +533,9 @@ def build_track_filename(
     reserved_paths: Optional[set[str]] = None,
 ) -> Optional[str]:
     """按"歌手 - 歌名"生成输出路径;信息不足时返回 None。"""
-    artist = _safe_filename_component(artist)
-    title = _safe_filename_component(title)
-    if not title:
+    stem = track_filename(artist, title)
+    if not stem:
         return None
-    stem = f"{artist} - {title}" if artist else title
     reserved_paths = reserved_paths if reserved_paths is not None else set()
     dst = os.path.join(out_dir, stem + ext)
     i = 1
@@ -774,15 +781,25 @@ def is_qmc_file(path: str) -> bool:
 
 
 def make_output_path(
-    src: str, out_dir: str, reserved_paths: Optional[set[str]] = None
+    src: str,
+    out_dir: str,
+    reserved_paths: Optional[set[str]] = None,
+    avoid_existing: bool = True,
 ) -> str:
-    """构造输出路径: 同名 + 对应音频扩展名,避免覆盖或同批次重名。"""
+    """构造输出路径: 同名 + 对应音频扩展名。
+
+    avoid_existing=True 时自动加 _1/_2 避开已有文件；
+    False 时用于“跳过 / 覆盖”策略，保留自然文件名。
+    """
     ext = QMC_EXTS.get(os.path.splitext(src)[1].lower(), ".bin")
     base = os.path.splitext(os.path.basename(src))[0]
     dst = os.path.join(out_dir, base + ext)
     reserved_paths = reserved_paths if reserved_paths is not None else set()
     i = 1
-    while os.path.exists(dst) or os.path.normcase(os.path.abspath(dst)) in reserved_paths:
+    while (
+        (avoid_existing and os.path.exists(dst))
+        or os.path.normcase(os.path.abspath(dst)) in reserved_paths
+    ):
         dst = os.path.join(out_dir, f"{base}_{i}{ext}")
         i += 1
     reserved_paths.add(os.path.normcase(os.path.abspath(dst)))

@@ -165,6 +165,79 @@ def build_output_path(
     return dst
 
 
+def unique_path(path: str) -> str:
+    """返回不与现有文件冲突的路径：冲突时追加 _1/_2。"""
+    if not os.path.exists(path):
+        return path
+    stem, ext = os.path.splitext(path)
+    i = 1
+    while True:
+        candidate = f"{stem}_{i}{ext}"
+        if not os.path.exists(candidate):
+            return candidate
+        i += 1
+
+
+def is_removable_path(path: str) -> bool:
+    """路径是否位于可移动盘 / 网络盘 / 光驱。
+
+    这类盘的随机写入很慢，解密时把中间文件直接写上去会把整机 I/O 打满。
+    调用方应改用本地暂存目录处理，最后只把成品复制一次。
+    """
+    if os.name != "nt":
+        return False
+    try:
+        import ctypes
+
+        drive = os.path.splitdrive(os.path.abspath(path))[0]
+        if not drive:
+            return False
+        # DRIVE_REMOVABLE=2, DRIVE_REMOTE=4, DRIVE_CDROM=5
+        return ctypes.windll.kernel32.GetDriveTypeW(drive + "\\") in (2, 4, 5)
+    except Exception:  # noqa: BLE001 - 探测失败按本地盘处理
+        return False
+
+
+def staging_dir() -> str:
+    """本地暂存目录（默认在系统盘）。"""
+    base = os.environ.get("LOCALAPPDATA") or tempfile.gettempdir()
+    path = os.path.join(base, "ShadowMusicGrabber", "staging")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def staging_path(name: str) -> str:
+    """在本地暂存目录里分配一个不冲突的路径。"""
+    return unique_path(os.path.join(staging_dir(), name))
+
+
+def place_file(src: str, dest_dir: str, overwrite: bool = False) -> str:
+    """把处理好的文件放到目标目录，返回最终路径。
+
+    先写 ``.part`` 再原子替换，避免目标盘上留下半截文件；
+    overwrite=False 时自动避开同名文件。
+    """
+    os.makedirs(dest_dir, exist_ok=True)
+    target = os.path.join(dest_dir, os.path.basename(src))
+    if not overwrite:
+        target = unique_path(target)
+    tmp = f"{target}.part"
+    try:
+        shutil.copyfile(src, tmp)
+        os.replace(tmp, target)
+    finally:
+        if os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+    try:
+        os.remove(src)
+    except OSError:
+        pass
+    return target
+
+
 class ConvertError(Exception):
     pass
 

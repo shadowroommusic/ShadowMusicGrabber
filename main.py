@@ -32,7 +32,7 @@ import qmc_decrypt
 import updater
 
 APP_NAME = "Shadow MusicGrabber"
-APP_VERSION = "1.12.2"
+APP_VERSION = "1.13.0"
 
 # 日志文件: 用户遇到卡顿/失败时可以直接回传这个文件定位问题。
 LOG_DIR = os.path.join(
@@ -117,6 +117,13 @@ DECRYPT_FORMAT_LABELS = {
     "MP3 (320kbps)": "mp3",
 }
 DECRYPT_TARGET_FORMATS = {"original", "flac", "wav", "mp3"}
+
+# 同名文件处理策略：显示名 -> 内部值。
+DECRYPT_EXISTS_LABELS = {
+    "自动改名（不覆盖）": "rename",
+    "跳过已存在": "skip",
+    "覆盖已存在": "overwrite",
+}
 
 
 def resource_path(*parts: str) -> str:
@@ -1022,6 +1029,28 @@ class App(ctk.CTk):
         )
         self.ncm_rate_hint.pack(side="left", padx=(12, 0))
 
+        exists_row = ctk.CTkFrame(parent, fg_color="transparent")
+        exists_row.pack(fill="x", padx=10, pady=(0, 4))
+        ctk.CTkLabel(exists_row, text="同名文件:").pack(side="left")
+        self.decrypt_exists_var = ctk.StringVar(value="rename")
+        self.decrypt_exists_label_var = ctk.StringVar(
+            value=i18n.tr("自动改名（不覆盖）")
+        )
+        ctk.CTkOptionMenu(
+            exists_row, width=190,
+            values=[i18n.tr(label) for label in DECRYPT_EXISTS_LABELS],
+            variable=self.decrypt_exists_label_var,
+            command=self._on_exists_change,
+            fg_color=BUTTON, button_color=BUTTON,
+            button_hover_color=BUTTON_HOVER, dropdown_fg_color=PANEL_ALT,
+            dropdown_hover_color=BUTTON_HOVER, text_color=TEXT,
+        ).pack(side="left", padx=6)
+        ctk.CTkLabel(
+            exists_row,
+            text="· 跳过可避免重复生成 _1/_2",
+            anchor="w", text_color=MUTED, font=ctk.CTkFont(size=12),
+        ).pack(side="left", padx=(10, 0))
+
         opt_row = ctk.CTkFrame(parent, fg_color="transparent")
         opt_row.pack(fill="x", padx=10, pady=(0, 4))
         self.rename_var = ctk.BooleanVar(value=True)
@@ -1170,6 +1199,12 @@ class App(ctk.CTk):
     def _on_decrypt_fmt_change(self, label: str):
         self.decrypt_fmt_var.set(DECRYPT_FORMAT_LABELS.get(i18n.untr(label), "original"))
 
+    def _on_exists_change(self, label: str):
+        """同名文件处理策略。"""
+        self.decrypt_exists_var.set(
+            DECRYPT_EXISTS_LABELS.get(i18n.untr(label), "rename")
+        )
+
     def _on_ncm_rate_change(self, label: str):
         """解密页的采样率下拉框。"""
         text = i18n.untr(label)
@@ -1289,25 +1324,60 @@ class App(ctk.CTk):
             self._running_jobs.discard("ncm")
             self._job_remaining.pop("ncm", None)
             return
+        policy = self.decrypt_exists_var.get() or "rename"
         try:
             reserved: set[str] = set()
+            ready: list = []
+            skipped = 0
             for task in pending:
                 task.error = ""
                 task.status = "排队中"
                 task.set_progress(0.0)
+                avoid = policy == "rename"
                 if isinstance(task, ncm_decrypt.NcmTask):
-                    task.dst = ncm_decrypt.make_output_path(task.src, out_dir, reserved)
+                    task.dst = ncm_decrypt.make_output_path(
+                        task.src, out_dir, reserved, avoid_existing=avoid
+                    )
                 else:
-                    task.dst = qmc_decrypt.make_output_path(task.src, out_dir, reserved)
+                    task.dst = qmc_decrypt.make_output_path(
+                        task.src, out_dir, reserved, avoid_existing=avoid
+                    )
+                if policy == "skip" and self._decrypt_output_exists(task, out_dir):
+                    task.status = "已跳过"
+                    task.set_progress(100.0)
+                    self.ui_queue.put(("ncm_refresh", task))
+                    skipped += 1
+                    continue
+                ready.append(task)
+            if skipped:
+                self.ui_queue.put(("log", f"已跳过 {skipped} 个已存在的文件"))
+            if not ready:
+                self._running_jobs.discard("ncm")
+                self._job_remaining.pop("ncm", None)
+                self._log("没有需要解密的文件(全部已存在)")
+                return
+            self._job_remaining["ncm"] = len(ready)
             threading.Thread(
                 target=self._ncm_worker,
-                args=(pending, target_fmt, sample_rate),
+                args=(ready, target_fmt, sample_rate, policy),
                 daemon=True,
             ).start()
         except Exception:
             self._running_jobs.discard("ncm")
             self._job_remaining.pop("ncm", None)
             raise
+
+    def _decrypt_output_exists(self, task, out_dir: str) -> bool:
+        """“跳过已存在”判断：能预读元数据时按最终文件名，否则按源文件名。"""
+        if isinstance(task, ncm_decrypt.NcmTask):
+            try:
+                meta = ncm_decrypt.peek_meta(task.src)
+                stem = qmc_decrypt.track_filename(meta.artist, meta.music_name)
+                if stem and os.path.exists(os.path.join(out_dir, stem + ".flac")):
+                    return True
+            except Exception:  # noqa: BLE001 - 预读失败就退回 task.dst
+                pass
+        return os.path.exists(task.dst)
 
     def _transcode_decrypted(self, raw: str, fmt: str, on_progress, sample_rate=None, metadata=None, cover=None) -> str:
         """把解密结果落到目标格式; fmt="original" 时只按需重采样,绝不转码。"""
@@ -1321,7 +1391,7 @@ class App(ctk.CTk):
             cover=cover,
         )
 
-    def _ncm_worker(self, tasks: list, target_fmt: str = "original", sample_rate=None):
+    def _ncm_worker(self, tasks: list, target_fmt: str = "original", sample_rate=None, policy: str = "rename"):
         total = len(tasks)
         # 批次开始时锁定采样率,避免中途改动下拉框影响同一批任务。
         rate_desc = self._rate_desc(sample_rate)
@@ -1337,6 +1407,15 @@ class App(ctk.CTk):
 
             try:
                 t_start = time.perf_counter()
+                # 可移动盘/网络盘：先在本机暂存目录完成全部处理，最后只复制成品，
+                # 避免把中间文件反复写到慢盘上把整机 I/O 打满。
+                final_dst = task.dst
+                use_staging = converter.is_removable_path(final_dst)
+                work_dst = (
+                    converter.staging_path(os.path.basename(final_dst))
+                    if use_staging
+                    else final_dst
+                )
                 # 需要重采样时,解密阶段只占进度条前 50%。
                 turning = target_fmt != "original" or bool(sample_rate)
                 step = (lambda p: on_progress(p * 0.5)) if turning else on_progress
@@ -1349,14 +1428,14 @@ class App(ctk.CTk):
                 )
                 if isinstance(task, ncm_decrypt.NcmTask):
                     raw, meta = ncm_decrypt.decrypt_file(
-                        task.src, task.dst, on_progress=step, ffmpeg=self.ffmpeg,
+                        task.src, work_dst, on_progress=step, ffmpeg=self.ffmpeg,
                         on_line=lambda line: self.ui_queue.put(("log", line)),
                         rename_by_meta=self.rename_by_meta,
                         write_meta=not defer_meta,
                     )
                 else:
                     raw, meta = qmc_decrypt.decrypt_file(
-                        task.src, task.dst, on_progress=step,
+                        task.src, work_dst, on_progress=step,
                         rename_by_meta=self.rename_by_meta,
                     )
                 t_decrypted = time.perf_counter()
@@ -1397,6 +1476,18 @@ class App(ctk.CTk):
                     dst = self._identify_and_rewrite(task, dst, on_progress)
                 if self.rename_by_meta:
                     dst = self._rename_decrypted(dst, meta)
+                if use_staging:
+                    task.status = "写入目标盘…"
+                    self.ui_queue.put(("ncm_refresh", task))
+                    t_copy = time.perf_counter()
+                    dst = converter.place_file(
+                        dst, os.path.dirname(final_dst),
+                        overwrite=(policy == "overwrite"),
+                    )
+                    log.info(
+                        "copy to target %s in %.2fs",
+                        dst, time.perf_counter() - t_copy,
+                    )
                 task.dst = dst
                 task.status = "完成"
                 task.set_progress(100.0)
@@ -1404,11 +1495,12 @@ class App(ctk.CTk):
                 name = getattr(meta, "music_name", "") or os.path.basename(dst)
                 self.ui_queue.put(("log", f"✓ 解密完成: {name} -> {dst}"))
                 log.info(
-                    "timing %s decrypt=%.2fs transcode=%.2fs total=%.2fs",
+                    "timing %s decrypt=%.2fs transcode=%.2fs total=%.2fs staging=%s",
                     os.path.basename(task.src),
                     t_decrypted - t_start,
                     t_transcoded - t_decrypted,
                     time.perf_counter() - t_start,
+                    use_staging,
                 )
             except Exception as e:
                 task.status = "失败"

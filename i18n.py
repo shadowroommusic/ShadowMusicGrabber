@@ -133,6 +133,15 @@ _EN = {
     # 解密页的输出命名开关
     "按“歌手 - 歌名”重命名输出文件": "Rename output files as “Artist - Title”",
     "· 取不到歌名时维持原文件名": "· Keeps the source filename when no title is available",
+    # 解密页同名文件策略 / 可移动盘暂存
+    "同名文件:": "Existing files:",
+    "自动改名（不覆盖）": "Auto-rename (keep both)",
+    "跳过已存在": "Skip existing",
+    "覆盖已存在": "Overwrite existing",
+    "· 跳过可避免重复生成 _1/_2": "· Skip avoids duplicate _1/_2 files",
+    "已跳过": "Skipped",
+    "写入目标盘…": "Writing to target drive…",
+    "没有需要解密的文件(全部已存在)": "Nothing to decrypt (all files already exist)",
     "输出命名: 按“歌手 - 歌名”": "Output naming: “Artist - Title”",
     "输出命名: 沿用源文件名": "Output naming: keep the source filename",
     "· 无法重命名(无歌名),维持: ": "· Cannot rename (no title), keeping: ",
