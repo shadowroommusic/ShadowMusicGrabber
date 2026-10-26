@@ -15,9 +15,10 @@ from enum import Enum
 from typing import Callable, Optional
 from urllib.parse import urlsplit
 
-import yt_dlp
-
 from converter import normalize_sample_rate
+
+# yt-dlp 导入要 0.5~1.5 秒,且只在真正下载/解析时才需要;
+# 延迟到函数内导入,让 GUI 启动不必等它。
 
 
 class FormatKind(str, Enum):
@@ -127,6 +128,8 @@ def build_ydl_opts(
         "extractor_retries": 3,
         "file_access_retries": 3,
         "socket_timeout": 30,
+        # HLS/DASH 分片并行拉取,B 站/Apple Music HLS 等分片流的吞吐明显提升。
+        "concurrent_fragment_downloads": 4,
         "windowsfilenames": True,
         "restrictfilenames": False,
         "writethumbnail": False,
@@ -162,6 +165,8 @@ def download_url(
     """
     if not is_valid_url(url):
         raise DownloadError(f"无效链接: {url!r}")
+
+    import yt_dlp
 
     rate = normalize_sample_rate(sample_rate)
     out_dir = os.path.abspath(os.fspath(out_dir))
@@ -318,6 +323,8 @@ def probe_url(url: str, ffmpeg_location: Optional[str] = None) -> dict:
     """只解析链接信息(标题/时长/平台),不下载。"""
     if not is_valid_url(url):
         raise DownloadError(f"无效链接: {url!r}")
+    import yt_dlp
+
     opts = {
         "quiet": True,
         "no_warnings": True,

@@ -22,6 +22,8 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -35,6 +37,22 @@ COVER_ART_ARCHIVE_URL = "https://coverartarchive.org/release/{release_id}/front"
 USER_AGENT = "ShadowMusicGrabber/1.0 ( https://github.com/shadowroommusic/ShadowMusicGrabber )"
 REQUEST_TIMEOUT = 20
 FPCALC_TIMEOUT = 180
+# MusicBrainz 官方要求至多 1 请求/秒;批量识别缺标签文件时不加节流会吃 503。
+MUSICBRAINZ_MIN_INTERVAL = 1.0
+
+_MB_LOCK = threading.Lock()
+_MB_LAST_REQUEST = 0.0
+
+
+def _throttle_musicbrainz() -> None:
+    """串行化对 MusicBrainz 的请求并保证间隔 ≥1 秒(可注入时钟,便于测试)。"""
+    global _MB_LAST_REQUEST
+    with _MB_LOCK:
+        now = time.monotonic()
+        wait = _MB_LAST_REQUEST + MUSICBRAINZ_MIN_INTERVAL - now
+        if wait > 0:
+            time.sleep(wait)
+        _MB_LAST_REQUEST = time.monotonic()
 
 
 class FingerprintError(Exception):
@@ -101,7 +119,9 @@ def compute_fingerprint(path: str, fpcalc: Optional[str] = None) -> tuple[int, s
         )
     try:
         proc = subprocess.run(
-            [exe, "-json", os.path.abspath(path)],
+            # -length 120: AcoustID 官方建议只取前两分钟,长文件(播客/串烧)
+            # 不再把整段都算一遍,识别速度大幅提升且命中率不受影响。
+            [exe, "-json", "-length", "120", os.path.abspath(path)],
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -184,7 +204,11 @@ def lookup_acoustid(
 
 
 def fetch_recording(mbid: str) -> dict:
-    """查 MusicBrainz 录音详情,返回 title / artist / album / release_id。"""
+    """查 MusicBrainz 录音详情,返回 title / artist / album / release_id。
+
+    带全局节流:MusicBrainz 要求 ≤1 请求/秒,批量识别时背靠背请求会被 503。
+    """
+    _throttle_musicbrainz()
     data = _http_get_json(
         MUSICBRAINZ_RECORDING_URL.format(mbid=mbid),
         {"fmt": "json", "inc": "artists+releases"},
