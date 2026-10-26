@@ -88,11 +88,7 @@ jobs:
       - name: Export version
         shell: bash
         run: |
-          V=$(python - <<'PY'
-          import re
-          print(re.search(r'__version__ = "([^"]+)"', open("_version.py").read()).group(1))
-          PY
-          )
+          V=$(python -c "import _version; print(_version.__version__)")
           echo "VERSION=$V" >> "$GITHUB_ENV"
 
       - name: Build with PyInstaller
