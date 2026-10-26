@@ -17,8 +17,9 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
         python: ["3.12"]
         include:
-          # requires-python >=3.9:在 Linux 上守住下限
-          - os: ubuntu-latest
+          # requires-python >=3.9:守住下限。3.9 已 EOL,ubuntu-latest(26.04)
+          # 的 setup-python 不再提供,固定到仍有 3.9 构建的 22.04。
+          - os: ubuntu-22.04
             python: "3.9"
     steps:
       - uses: actions/checkout@v4
