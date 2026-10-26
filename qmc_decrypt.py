@@ -425,6 +425,7 @@ def _read_qtag_title(f, size: int) -> str:
     except (OSError, struct.error):
         return ""
 
+    fallback: Optional[str] = None
     for part in chunk.split(b",")[1:]:  # 首段是密钥,跳过
         part = part.strip().strip(b"\x00").strip()
         if not part or len(part) > 200:
@@ -447,7 +448,11 @@ def _read_qtag_title(f, size: int) -> str:
         has_cjk = any(0x4E00 <= ord(ch) <= 0x9FFF for ch in text)
         if has_cjk or " " in text:
             return text
-    return ""
+        # 无 CJK 也无空格的候选(如单个英文词歌名)先记住,没有更好的再退回它;
+        # 但至少要含一个字母,排除纯数字 ID 之类的杂项。
+        if fallback is None and any(ch.isalpha() for ch in text):
+            fallback = text
+    return fallback or ""
 
 
 def write_basic_tags(

@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import platform
@@ -48,6 +49,7 @@ class UpdateInfo:
         asset_name: str = "",
         asset_url: str = "",
         asset_size: int = 0,
+        asset_digest: str = "",
     ):
         self.tag = tag
         self.name = name
@@ -55,6 +57,8 @@ class UpdateInfo:
         self.asset_name = asset_name
         self.asset_url = asset_url
         self.asset_size = asset_size
+        # GitHub API 的 asset.digest,形如 "sha256:<hex>";旧 Release 可能没有。
+        self.asset_digest = asset_digest
 
     @property
     def title(self) -> str:
@@ -174,6 +178,7 @@ def _check_via_api(current_version: str) -> UpdateInfo | None:
         asset_name=str(asset.get("name") or "") if asset else "",
         asset_url=str(asset.get("browser_download_url") or "") if asset else "",
         asset_size=int(asset.get("size") or 0) if asset else 0,
+        asset_digest=str(asset.get("digest") or "") if asset else "",
     )
 
 
@@ -243,9 +248,34 @@ def download_update(
                     on_progress(done / total if total else 0.0)
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         raise UpdateError(f"下载更新失败: {exc}") from exc
-    if info.asset_size and os.path.getsize(target) != info.asset_size:
+    if info.asset_digest:
+        _verify_sha256(target, info.asset_digest)
+    elif info.asset_size and os.path.getsize(target) != info.asset_size:
         raise UpdateError("下载的文件大小与 Release 不一致，已取消安装。")
     return target
+
+
+def _verify_sha256(path: str, digest: str) -> None:
+    """按 GitHub API 提供的 asset digest("sha256:<hex>")校验下载完整性。
+
+    大小校验只能挡住截断,哈希还能发现传输损坏与内容被替换。
+    """
+    expected = digest.strip().lower()
+    if expected.startswith("sha256:"):
+        expected = expected.split(":", 1)[1]
+    if not re.fullmatch(r"[0-9a-f]{64}", expected):
+        # 未知算法/格式:回退到只校验大小,不因 digest 格式新变化而卡死更新。
+        return
+    hasher = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            hasher.update(chunk)
+    actual = hasher.hexdigest()
+    if actual != expected:
+        os.remove(path)
+        raise UpdateError(
+            "下载的文件校验失败(SHA256 不一致)，已删除并取消安装。"
+        )
 
 
 _APPLY_VBS = r'''Option Explicit

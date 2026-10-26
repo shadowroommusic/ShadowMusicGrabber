@@ -416,6 +416,11 @@ def beatportdl_download(
             )
     except OSError as e:
         raise PremiumError(f"无法写入 beatportdl 配置: {e}") from e
+    try:
+        # 配置里有明文密码,收紧到仅当前用户可读写。
+        os.chmod(cfg, 0o600)
+    except OSError:
+        pass
 
     # -q makes beatportdl exit after the supplied URL is handled. Without it,
     # the tool returns to its interactive prompt and the GUI worker never ends.
