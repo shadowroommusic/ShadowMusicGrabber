@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import base64
+import io
 import json
 import os
 import struct
@@ -27,7 +28,9 @@ NCM_MAGIC = b"CTENFDAM"
 # 固定密钥(公开于 ncmdump 项目)
 CORE_KEY = bytes.fromhex("687A4852416D736F356B496E62617857")  # hzHRAmso5kInbaxW
 META_KEY = bytes.fromhex("2331346C6A6B5F215C5D2630553C2728")  # #14ljk_!\]&0U<'(
-CHUNK_SIZE = 0x8000
+# 1 MiB:必须是 256 字节密钥周期的整数倍(1 MiB = 4096 × 256)。
+# XOR 在 PyCryptodome 的 C 层完成,块越大 Python 循环与进度回调的次数越少。
+CHUNK_SIZE = 1 << 20
 
 AUDIO_EXT_MAP = {b"fLaC": "flac", b"ID3": "mp3", b"\xff\xfb": "mp3", b"\xff\xf3": "mp3", b"\xff\xf2": "mp3"}
 
@@ -325,76 +328,21 @@ def decrypt_ncm_bytes(
     data: bytes,
     on_progress: Optional[Callable[[float], None]] = None,
 ) -> tuple[bytes, NcmMeta, bytes]:
-    """解密整个 .ncm 文件内容,返回 (音频字节, 元数据, 封面图片字节)。"""
-    if len(data) < 8 or data[:8] != NCM_MAGIC:
-        raise NcmError("不是有效的 NCM 文件(魔数错误)")
+    """解密整个 .ncm 文件内容,返回 (音频字节, 元数据, 封面图片字节)。
 
-    if len(data) < 14:
+    头部解析直接复用 :func:`_read_ncm_header`(经由 BytesIO),
+    不再维护第二份逐字段的解析代码——两份实现曾经需要人工保持同步。
+    """
+    stream = io.BytesIO(data)
+    file_size = len(data)
+    if file_size < 14:
+        # 与旧实现一致:过短文件按魔数/截断报错,而不是 KeyError。
+        if file_size < 8 or data[:8] != NCM_MAGIC:
+            raise NcmError("不是有效的 NCM 文件(魔数错误)")
         raise NcmError("NCM file is truncated")
-    pos = 10  # 8 magic + 2 version
+    box, meta, cover, audio_offset = _read_ncm_header(stream, file_size)
 
-    # ---- key 数据(XOR 0x64 -> AES-128-ECB 解密 -> 去掉填充 -> 跳过前 17 字节)----
-    if pos + 4 > len(data):
-        raise NcmError("NCM file is truncated before key length")
-    key_len = struct.unpack_from("<I", data, pos)[0]
-    pos += 4
-    if key_len <= 0 or pos + key_len > len(data):
-        raise NcmError("NCM 文件损坏(key 长度非法)")
-    key_data = bytes(b ^ 0x64 for b in data[pos:pos + key_len])
-    pos += key_len
-
-    if len(key_data) % 16:
-        raise NcmError("NCM key data has an invalid AES block length")
-    try:
-        key_data = unpad(AES.new(CORE_KEY, AES.MODE_ECB).decrypt(key_data), 16)[17:]
-    except (ValueError, IndexError) as e:
-        raise NcmError(f"key 解密失败: {e}") from e
-    if not key_data:
-        raise NcmError("key 数据为空")
-
-    box = build_key_box(key_data)
-
-    # ---- 元数据(XOR 0x63 -> 跳过 22 字节标识 -> base64 -> AES 解密 -> 跳过 music:)----
-    if pos + 4 > len(data):
-        raise NcmError("NCM file is truncated before metadata")
-    meta_len = struct.unpack_from("<I", data, pos)[0]
-    pos += 4
-    meta_obj = NcmMeta()
-    if meta_len > 0:
-        if pos + meta_len > len(data):
-            raise NcmError("NCM 文件损坏(元数据长度非法)")
-        meta_raw = bytes(b ^ 0x63 for b in data[pos:pos + meta_len])
-        pos += meta_len
-        meta_obj = _parse_metadata(meta_raw)
-    else:
-        pos += 0
-
-    # ---- skip crc32(4) + image version(1) ----
-    if pos + 5 > len(data):
-        raise NcmError("NCM file is truncated before cover data")
-    pos += 5
-
-    # ---- 封面 ----
-    cover = b""
-    if pos + 4 <= len(data):
-        image_space = struct.unpack_from("<I", data, pos)[0]
-        pos += 4
-        if pos + 4 > len(data):
-            raise NcmError("NCM file is truncated before cover size")
-        image_size = struct.unpack_from("<I", data, pos)[0]
-        pos += 4
-        if image_size > image_space:
-            raise NcmError("NCM cover size is invalid")
-        if image_space > len(data) - pos:
-            raise NcmError("NCM cover block length is invalid")
-        if image_size > 0 and pos + image_size <= len(data):
-            cover = data[pos:pos + image_size]
-            pos += image_size
-        pos += image_space - image_size
-        pos = min(pos, len(data))
-
-    # ---- 音频流解密 ----
-    audio = data[pos:]
+    audio = data[audio_offset:]
     if not audio:
         raise NcmError("NCM file contains no audio data")
     stream_key = _build_stream_key(box)
@@ -410,7 +358,7 @@ def decrypt_ncm_bytes(
         # responsive even on systems where extension calls hold the GIL.
         if chunk_index % 32 == 31:
             time.sleep(0)
-    return bytes(out), meta_obj, cover
+    return bytes(out), meta, cover
 
 
 def detect_audio_format(audio: bytes) -> str:
@@ -466,6 +414,68 @@ def write_flac_meta(path: str, meta: NcmMeta, cover: bytes, identifier: str = ""
     audio.save()
 
 
+def write_mp3_meta(path: str, meta: NcmMeta, cover: bytes, identifier: str = "") -> None:
+    """向 MP3 写入 ID3v2 标签(TIT2/TPE1/TPE2/TALB/TRCK/TPOS/TDRC/TCON)与封面。"""
+    from mutagen.id3 import APIC, ID3, TALB, TCON, TDRC, TIT2, TPOS, TPE1, TPE2, TRCK
+    from mutagen.mp3 import MP3
+
+    audio = MP3(path)
+    if audio.tags is None:
+        audio.add_tags()
+    tags = audio.tags
+    mapping = {
+        TIT2: meta.music_name,
+        TPE1: meta.artist,
+        TPE2: meta.album_artist,
+        TALB: meta.album,
+        TDRC: meta.publish_date,
+        TRCK: meta.track_number,
+        TPOS: meta.disc_number,
+        TCON: meta.genre,
+    }
+    for frame_cls, value in mapping.items():
+        text = str(value or "").strip()
+        if text:
+            tags.setall(frame_cls.__name__, [frame_cls(encoding=3, text=text)])
+    if identifier:
+        from mutagen.id3 import COMM
+
+        tags.setall("COMM", [COMM(encoding=3, lang="eng", desc="", text=identifier)])
+    if cover:
+        try:
+            tags.delall("APIC")
+        except Exception:  # noqa: BLE001 - 没有旧封面可删
+            pass
+        mime = "image/png" if cover[:4] == b"\x89PNG" else "image/jpeg"
+        tags.add(APIC(encoding=3, mime=mime, type=3, desc="Cover", data=cover))
+    audio.save()
+
+
+def write_audio_meta(
+    path: str,
+    meta: NcmMeta,
+    cover: bytes,
+    identifier: str = "",
+    audio_fmt: str = "",
+) -> bool:
+    """按音频实际格式写标签;``audio_fmt`` 缺省时按扩展名判断。
+
+    临时文件的扩展名可能与内容不符(original 模式下 MP3 内容躺在
+    ``.flac`` 后缀的临时文件里),所以调用方应显式传入解密检测到的格式。
+    """
+    fmt = (audio_fmt or os.path.splitext(path)[1].lstrip(".")).lower()
+    try:
+        if fmt == "flac":
+            write_flac_meta(path, meta, cover, identifier)
+            return True
+        if fmt == "mp3":
+            write_mp3_meta(path, meta, cover, identifier)
+            return True
+    except Exception:  # noqa: BLE001 - 元数据写入失败不致命
+        return False
+    return False
+
+
 def decrypt_file(
     src: str,
     dst: str,
@@ -474,10 +484,13 @@ def decrypt_file(
     ffmpeg: Optional[str] = None,
     rename_by_meta: bool = False,
     write_meta: bool = True,
+    output_fmt: str = "flac",
 ) -> tuple[str, NcmMeta]:
-    """解密单个 .ncm 文件,输出 FLAC(若内嵌为 MP3 则用 ffmpeg 转 FLAC)。
+    """解密单个 .ncm 文件,返回 (输出路径, 元数据)。
 
-    返回 (输出路径, 元数据)。
+    output_fmt="flac"(默认):内嵌 MP3 时用 ffmpeg 转成 FLAC。
+    output_fmt="original":"解密得到什么就是什么"——内嵌 MP3 就保留 MP3
+    (标签走 ID3 写入),不再强制转 FLAC,也不依赖 ffmpeg。
 
     rename_by_meta=True 时,若能从元数据取到歌名,会把输出重命名为
     "歌手 - 歌名.flac"。
@@ -527,7 +540,7 @@ def decrypt_file(
         if on_progress:
             on_progress(50.0)
 
-        if fmt != "flac":
+        if fmt != "flac" and output_fmt != "original":
             # 内嵌 mp3 -> 用 ffmpeg 转 flac(无损容器)
             tmp_mp3 = temp_dst + ".mp3"
             os.replace(temp_dst, tmp_mp3)
@@ -536,6 +549,7 @@ def decrypt_file(
             finally:
                 if os.path.exists(tmp_mp3):
                     os.remove(tmp_mp3)
+            fmt = "flac"
 
         if on_progress:
             on_progress(80.0)
@@ -547,11 +561,15 @@ def decrypt_file(
             identifier = f"{meta.music_name} - {meta.artist}".strip(" -")
         if write_meta:
             try:
-                write_flac_meta(temp_dst, meta, cover, identifier)
+                if not write_audio_meta(temp_dst, meta, cover, identifier, audio_fmt=fmt) and on_line:
+                    on_line("警告: 元数据写入失败: 不支持的输出容器")
             except Exception as e:  # noqa: BLE001 - 元数据写入失败不致命
                 if on_line:
                     on_line(f"警告: 元数据写入失败: {e}")
 
+        # original 模式下内嵌 mp3 的输出扩展名跟内容走,而不是沿用 .flac。
+        if fmt == "mp3":
+            dst = os.path.splitext(dst)[0] + ".mp3"
         os.replace(temp_dst, dst)
     finally:
         if os.path.exists(temp_dst):
@@ -595,6 +613,8 @@ def _transcode_to_flac(
     ffmpeg_exe = ffmpeg or find_ffmpeg()
     if not ffmpeg_exe:
         raise NcmError("未找到 ffmpeg,无法将内嵌 MP3 转码为 FLAC")
+    from converter import FLAC_COMPRESSION_LEVEL
+
     cmd = [
         ffmpeg_exe,
         "-hide_banner",
@@ -608,7 +628,7 @@ def _transcode_to_flac(
         "-c:a",
         "flac",
         "-compression_level",
-        "8",
+        str(FLAC_COMPRESSION_LEVEL),
         "-f",
         "flac",
         dst,
