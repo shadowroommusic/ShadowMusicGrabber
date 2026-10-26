@@ -18,3 +18,10 @@ bin/*.log
 
 # 第三方二进制(体积大, 请按 README 自行放入 bin/)
 bin/beatportdl.exe
+
+# 本地测试用的 ffmpeg/ffprobe(体积大, CI 与用户自行安装)
+bin/ffmpeg
+bin/ffprobe
+
+# 本地虚拟环境
+.venv/

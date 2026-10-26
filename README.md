@@ -7,6 +7,7 @@ Windows 桌面工具，四个彼此独立的工作模块：公开链接下载、
 除了图形界面，仓库还内置一个 **MCP 服务**，可以让 Claude / Cursor / Shadow 等 AI 助手直接调用同一套能力——见 [使用方式二](#使用方式二接入-ai-agentmcp-服务)。
 
 [![Latest release](https://img.shields.io/github/v/release/shadowroommusic/ShadowMusicGrabber?label=release)](https://github.com/shadowroommusic/ShadowMusicGrabber/releases/latest)
+[![CI](https://github.com/shadowroommusic/ShadowMusicGrabber/actions/workflows/ci.yml/badge.svg)](https://github.com/shadowroommusic/ShadowMusicGrabber/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 ## 界面预览 / Screenshots
@@ -111,7 +112,7 @@ python main.py
 - 发现新版本时询问是否下载；确认后自动下载并替换当前 EXE，然后重启程序。
 - 只挑选与当前系统和架构匹配的资产，不会误装其他平台的包。
 - 优先走 GitHub API；**API 被限流（未登录每小时 60 次）或不可用时自动退回网页方式**读取最新版本。
-- 下载后校验文件大小，不一致则拒绝安装。
+- 下载后校验文件完整性：Release 资产带 SHA256 摘要时做哈希校验，否则退回大小校验，不一致一律拒绝安装。
 - 替换由后台脚本（VBScript，隐藏运行）完成：等待程序退出 → 覆盖 → 重启，带超时保护，不会弹出窗口、也不会卡住。
 - 从源码运行时不会替换文件，只提供下载页入口。
 
@@ -163,7 +164,8 @@ python main.py
 
 - **输出命名**：默认按 `歌手 - 歌名.ext` 重命名（解密页可关闭）。取不到歌名时维持源文件名并会在日志里说明原因；重名自动加 `_1`、`_2` 后缀；会过滤 Windows 非法字符与保留设备名。
 - **拖拽添加**：把加密文件或整个文件夹直接拖进队列即可批量添加（文件夹会递归扫描）。
-- **输出格式**：可选“原始格式”（最快、保真度最高）或转成 FLAC / WAV / MP3；转码需要 ffmpeg，转码失败时解密结果仍会保留。
+- **输出格式**：可选“原始格式”（解密得到什么就是什么：NCM 内嵌 FLAC 输出 FLAC、内嵌 MP3 输出 MP3，不需要 ffmpeg）或转成 FLAC / WAV / MP3；转码需要 ffmpeg，转码失败时解密结果仍会保留。
+- **批量性能**：解密 / 转码 / 视频提取批次按 2-4 个任务并行处理（XOR 与 ffmpeg 都释放 GIL）；同名输出文件的重命名与落盘全程加锁，并行下也不会互相覆盖。
 - 全部在本地完成、不上传任何文件，请仅用于你合法获得的文件。
 
 `qmc_decrypt.py` 为自包含纯 Python 实现；解密结果已与两个独立开源实现（MusicDecrypto、libtakiyasha）逐字节交叉验证，回归夹具见 `tests/data/qmc/`（由 `tools/make_qmc_fixtures.py` 生成的合成数据）。
@@ -180,6 +182,8 @@ python main.py
 
 ## 自行构建
 
+本地构建（Windows）：
+
 ```powershell
 python -m pip install -r requirements.txt pyinstaller
 python -m pytest tests -q
@@ -188,6 +192,8 @@ pyinstaller --noconfirm --clean ShadowMusicGrabber.spec
 
 生成物为 `dist\ShadowMusicGrabber.exe`。spec 会收集 yt-dlp、customtkinter、gamdl、Crypto、mutagen、tkinterdnd2；`bin\beatportdl.exe` 存在时一并打包。FFmpeg 不复制进 EXE，请确保目标机器可找到它，或把 `ffmpeg.exe` / `ffprobe.exe` 放在 EXE 同目录。
 
+CI 会自动跑全平台测试矩阵（Ubuntu / Windows / macOS），并在每次推送时构建三份产物（`windows-x64.exe`、`macos-arm64.zip`、`macos-x64.zip`）；推送 `v*` 标签时自动创建 GitHub Release 并附上这些资产，命名与程序内自动更新的约定一致（`ShadowMusicGrabber-<版本>-<平台>-<架构>.<扩展名>`）。发版只需要改 `_version.py` 一处版本号。
+
 测试覆盖 URL 校验与平台识别、yt-dlp 选项、FFmpeg/ffprobe 定位、24-bit 音频转码、采样率规范化与真实重采样（44.1k/48k/96k/192k 及保持原始）、**转码与重采样中的封面保留**、原子输出、NCM 封面段解析与 C 层 XOR 解密、扩展元数据（专辑艺人/日期/曲号/碟号/流派）、QTag 歌名提取与标签补写、输出文件名安全处理（非法字符/保留设备名/重名后缀）、QQ 音乐 QMC 解密（v1/v2 全格式、真实测试向量、尾部/密钥链异常）、Premium 参数校验与凭据自检、更新模块的版本比较/平台资产选择/限流兜底、MCP 服务的协议与工具接口，以及界面文案的翻译覆盖率。
 
 ## 目录
@@ -195,6 +201,7 @@ pyinstaller --noconfirm --clean ShadowMusicGrabber.spec
 ```text
 ShadowMusicGrabber/
 ├── main.py                    # customtkinter GUI(更新入口 + 语言切换)
+├── _version.py                # 版本号单一来源(pyproject / MCP / GUI 共用)
 ├── i18n.py                    # 中英文界面文案与自动翻译
 ├── updater.py                 # GitHub Releases 更新检查/下载/替换
 ├── downloader.py              # yt-dlp 链接下载与解析
@@ -206,10 +213,11 @@ ShadowMusicGrabber/
 ├── mcp_server.py              # MCP 服务(stdio, 供 AI Agent 调用)
 ├── pyproject.toml             # MCP 服务的 uvx / pip 打包声明
 ├── ShadowMusicGrabber.spec    # PyInstaller 配置
+├── .github/workflows/ci.yml   # 测试矩阵 + 双平台构建 + 标签自动发布
 ├── assets/                    # 图标(icon.png / icon.ico)
 ├── tools/make_icon.py         # 图标生成脚本
 ├── tools/make_qmc_fixtures.py # QMC 测试夹具生成脚本
-├── bin/                       # 可选第三方工具(beatportdl.exe)
+├── bin/                       # 可选第三方工具(beatportdl.exe / fpcalc)
 ├── tests/                     # 单元测试(含 tests/data/qmc 夹具)
 └── LICENSE                    # MIT
 ```
