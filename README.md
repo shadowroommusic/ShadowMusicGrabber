@@ -192,7 +192,7 @@ pyinstaller --noconfirm --clean ShadowMusicGrabber.spec
 
 生成物为 `dist\ShadowMusicGrabber.exe`。spec 会收集 yt-dlp、customtkinter、gamdl、Crypto、mutagen、tkinterdnd2；`bin\beatportdl.exe` 存在时一并打包。FFmpeg 不复制进 EXE，请确保目标机器可找到它，或把 `ffmpeg.exe` / `ffprobe.exe` 放在 EXE 同目录。
 
-CI 会自动跑全平台测试矩阵（Ubuntu / Windows / macOS），并在每次推送时构建三份产物（`windows-x64.exe`、`macos-arm64.zip`、`macos-x64.zip`）；推送 `v*` 标签时自动创建 GitHub Release 并附上这些资产，命名与程序内自动更新的约定一致（`ShadowMusicGrabber-<版本>-<平台>-<架构>.<扩展名>`）。发版只需要改 `_version.py` 一处版本号。
+CI 会自动跑全平台测试矩阵（Ubuntu / Windows / macOS），并在每次推送时构建 `windows-x64.exe` 与 `macos-arm64.zip` 两份产物；推送 `v*` 标签时自动创建 GitHub Release 并附上这些资产，命名与程序内自动更新的约定一致（`ShadowMusicGrabber-<版本>-<平台>-<架构>.<扩展名>`）。发版只需要改 `_version.py` 一处版本号。Intel Mac（x64）的 GitHub 托管 runner 已退役、无法稳定构建，需要的话可在 Intel Mac 上按上面的本地构建步骤自行打包。
 
 测试覆盖 URL 校验与平台识别、yt-dlp 选项、FFmpeg/ffprobe 定位、24-bit 音频转码、采样率规范化与真实重采样（44.1k/48k/96k/192k 及保持原始）、**转码与重采样中的封面保留**、原子输出、NCM 封面段解析与 C 层 XOR 解密、扩展元数据（专辑艺人/日期/曲号/碟号/流派）、QTag 歌名提取与标签补写、输出文件名安全处理（非法字符/保留设备名/重名后缀）、QQ 音乐 QMC 解密（v1/v2 全格式、真实测试向量、尾部/密钥链异常）、Premium 参数校验与凭据自检、更新模块的版本比较/平台资产选择/限流兜底、MCP 服务的协议与工具接口，以及界面文案的翻译覆盖率。
 

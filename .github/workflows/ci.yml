@@ -60,7 +60,6 @@ jobs:
     name: build ${{ matrix.platform }}
     needs: test
     runs-on: ${{ matrix.os }}
-    continue-on-error: ${{ matrix.optional || false }}
     strategy:
       fail-fast: false
       matrix:
@@ -68,15 +67,11 @@ jobs:
           - os: windows-latest
             platform: windows-x64
             ext: .exe
+          # Intel macos-13 runner 已退役、长期排不上队,曾把发布堵死一整晚;
+          # Intel Mac 用户可用 PyInstaller 按 README 自行构建。
           - os: macos-latest
             platform: macos-arm64
             ext: .zip
-          # Intel runner(macos-13)在退役中、排队可能非常久:
-          # 尽力构建,失败/排不上不阻塞测试与发布(arm64 包是主流)。
-          - os: macos-13
-            platform: macos-x64
-            ext: .zip
-            optional: true
     steps:
       - uses: actions/checkout@v4
 
