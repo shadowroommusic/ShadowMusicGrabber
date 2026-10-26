@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "shadow-musicgrabber"
-version = "1.13.0"
+dynamic = ["version"]
 description = "Shadow MusicGrabber MCP server: audio probe, NCM / QQ Music decrypt, transcode, download"
 readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.9"
 license = { text = "MIT" }
 keywords = ["mcp", "music", "ncm", "qmc", "flac", "yt-dlp"]
-# 版本号与 main.py 的 APP_VERSION 保持一致。
+# 版本号单一来源: _version.py(main.py / mcp_server.py 同样引用它)。
 dependencies = [
     "yt-dlp>=2024.1.1",
     "mutagen>=1.47.0",
@@ -30,8 +30,12 @@ gui = [
 [project.scripts]
 shadow-musicgrabber-mcp = "mcp_server:main"
 
+[tool.setuptools.dynamic]
+version = { attr = "_version.__version__" }
+
 [tool.setuptools]
 py-modules = [
+    "_version",
     "mcp_server",
     "converter",
     "downloader",

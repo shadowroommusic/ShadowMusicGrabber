@@ -30,9 +30,15 @@ import ncm_decrypt
 import premium
 import qmc_decrypt
 import updater
+from _version import __version__ as APP_VERSION
+
+# 并行批次的线程数:XOR 解密与 ffmpeg 子进程都释放 GIL,
+# 2-4 个并发对大批量接近线性提速;太高会互相抢磁盘,得不偿失。
+BATCH_WORKERS = min(4, os.cpu_count() or 1)
+# 同时进行的下载任务数(每个下载还可能再起 ffmpeg 后处理)。
+DOWNLOAD_CONCURRENCY = 3
 
 APP_NAME = "Shadow MusicGrabber"
-APP_VERSION = "1.13.0"
 
 # 日志文件: 用户遇到卡顿/失败时可以直接回传这个文件定位问题。
 LOG_DIR = os.path.join(
@@ -202,6 +208,11 @@ class App(ctk.CTk):
         self._job_remaining: dict[str, int] = {}
         self._last_progress_update: dict[int, float] = {}
         self._progress_lock = threading.Lock()
+        # 同名成品"查重 + 落盘"的互斥锁:并行批次下两个同名文件会同时
+        # 通过 exists 检查然后互相覆盖。
+        self._rename_lock = threading.Lock()
+        # 限制同时进行的下载数(每 URL 一个线程,这里统一闸门)。
+        self._dl_semaphore = threading.BoundedSemaphore(DOWNLOAD_CONCURRENCY)
         self._closing = False
         self._update_busy = False
         self.ffmpeg = converter.find_ffmpeg()
@@ -365,7 +376,12 @@ class App(ctk.CTk):
         """打开日志目录, 方便用户回传 app.log。"""
         try:
             os.makedirs(LOG_DIR, exist_ok=True)
-            os.startfile(LOG_DIR)  # type: ignore[attr-defined]
+            if os.name == "nt":
+                os.startfile(LOG_DIR)  # type: ignore[attr-defined]
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", LOG_DIR])
+            else:
+                subprocess.Popen(["xdg-open", LOG_DIR])
         except OSError as exc:
             messagebox.showerror("无法打开日志目录", f"{LOG_DIR}\n\n{exc}")
 
@@ -391,6 +407,55 @@ class App(ctk.CTk):
                 return False
             self._last_progress_update[key] = now
             return True
+
+    def _run_batch_parallel(
+        self, jobs, run_one, name: str, total_kind: str, refresh_kind: str
+    ) -> None:
+        """并行执行一批任务:daemon 工作线程从一个队列取活,直到取空。
+
+        XOR 解密(PyCryptodome C 层)与 ffmpeg 子进程都释放 GIL,
+        2-4 并发对大批量接近线性提速。线程全部为 daemon,与旧的串行
+        worker 一致——退出程序时不会等待在途的 ffmpeg。
+        """
+        total = len(jobs)
+        work: queue.Queue = queue.Queue()
+        for job in jobs:
+            work.put(job)
+        state = {"done": 0}
+        lock = threading.Lock()
+
+        def take_one():
+            while True:
+                try:
+                    task = work.get_nowait()
+                except queue.Empty:
+                    return
+                try:
+                    run_one(task)
+                except Exception as e:  # noqa: BLE001 - 单任务异常绝不拖垮整批
+                    log.exception("batch task failed: %r", task)
+                    try:
+                        task.status = "失败"
+                        task.error = str(e)
+                        self.ui_queue.put((refresh_kind, task))
+                    except Exception:  # noqa: BLE001
+                        pass
+                finally:
+                    with lock:
+                        state["done"] += 1
+                        done = state["done"]
+                    self.ui_queue.put((total_kind, (done, total)))
+                    self._end_job(name)
+
+        workers = max(1, min(BATCH_WORKERS, total))
+        threads = [
+            threading.Thread(target=take_one, daemon=True, name=f"batch-{name}-{i}")
+            for i in range(workers)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
 
     # ---------- UI 构建 ----------
     def _build_ui(self):
@@ -910,12 +975,12 @@ class App(ctk.CTk):
         threading.Thread(target=self._va_worker, args=(pending,), daemon=True).start()
 
     def _va_worker(self, tasks: list):
-        total = len(tasks)
         # 批次开始时锁定采样率,避免中途改动下拉框影响同一批任务。
         sample_rate = self._va_sample_rate()
         rate_desc = self._rate_desc(sample_rate)
         self.ui_queue.put(("log", f"提取批次开始 · {len(tasks)} 个任务 · {rate_desc}"))
-        for i, task in enumerate(tasks):
+
+        def run_one(task):
             task.status = "处理中…"
             self.ui_queue.put(("va_refresh", task))
             try:
@@ -952,8 +1017,8 @@ class App(ctk.CTk):
                 task.error = str(e)
                 self.ui_queue.put(("va_refresh", task))
                 self.ui_queue.put(("log", f"✗ 提取失败: {e}"))
-            self.ui_queue.put(("va_total", (i + 1, total)))
-            self._end_job("video")
+
+        self._run_batch_parallel(tasks, run_one, "video", "va_total", "va_refresh")
 
     def _clear_va_list(self):
         if not self._require_idle("video", "视频转音频队列"):
@@ -1373,8 +1438,12 @@ class App(ctk.CTk):
             try:
                 meta = ncm_decrypt.peek_meta(task.src)
                 stem = qmc_decrypt.track_filename(meta.artist, meta.music_name)
-                if stem and os.path.exists(os.path.join(out_dir, stem + ".flac")):
-                    return True
+                if stem:
+                    # original 模式下内嵌 MP3 的成品是 .mp3,其余是 .flac;
+                    # 两种扩展名都查一遍,避免同名不同容器时误判。
+                    for ext in (".flac", ".mp3"):
+                        if os.path.exists(os.path.join(out_dir, stem + ext)):
+                            return True
             except Exception:  # noqa: BLE001 - 预读失败就退回 task.dst
                 pass
         return os.path.exists(task.dst)
@@ -1392,11 +1461,11 @@ class App(ctk.CTk):
         )
 
     def _ncm_worker(self, tasks: list, target_fmt: str = "original", sample_rate=None, policy: str = "rename"):
-        total = len(tasks)
         # 批次开始时锁定采样率,避免中途改动下拉框影响同一批任务。
         rate_desc = self._rate_desc(sample_rate)
         self.ui_queue.put(("log", f"解密批次开始 · {len(tasks)} 个文件 · {rate_desc}"))
-        for i, task in enumerate(tasks):
+
+        def run_one(task):
             task.status = "解密中…"
             self.ui_queue.put(("ncm_refresh", task))
 
@@ -1426,17 +1495,21 @@ class App(ctk.CTk):
                     and target_fmt == "original"
                     and bool(sample_rate)
                 )
+                # 重命名统一在批次末尾由 _rename_decrypted 加锁完成;
+                # 并行解密时若让 decrypt_file 各自改名,同名曲目会互相覆盖。
                 if isinstance(task, ncm_decrypt.NcmTask):
                     raw, meta = ncm_decrypt.decrypt_file(
                         task.src, work_dst, on_progress=step, ffmpeg=self.ffmpeg,
                         on_line=lambda line: self.ui_queue.put(("log", line)),
-                        rename_by_meta=self.rename_by_meta,
+                        rename_by_meta=False,
                         write_meta=not defer_meta,
+                        # original 模式:内嵌 MP3 保留 MP3,不强制转 FLAC。
+                        output_fmt="original" if target_fmt == "original" else "flac",
                     )
                 else:
                     raw, meta = qmc_decrypt.decrypt_file(
                         task.src, work_dst, on_progress=step,
-                        rename_by_meta=self.rename_by_meta,
+                        rename_by_meta=False,
                     )
                 t_decrypted = time.perf_counter()
                 dst = raw
@@ -1475,7 +1548,10 @@ class App(ctk.CTk):
                     self.ui_queue.put(("ncm_refresh", task))
                     dst = self._identify_and_rewrite(task, dst, on_progress)
                 if self.rename_by_meta:
-                    dst = self._rename_decrypted(dst, meta)
+                    # 加锁保证"查重 + 改名"原子:并行批次下两个同名曲目
+                    # 会同时通过 exists 检查然后互相覆盖。
+                    with self._rename_lock:
+                        dst = self._rename_decrypted(dst, meta)
                 if use_staging:
                     task.status = "写入目标盘…"
                     self.ui_queue.put(("ncm_refresh", task))
@@ -1508,8 +1584,8 @@ class App(ctk.CTk):
                 log.exception("decrypt failed: %s", task.src)
                 self.ui_queue.put(("ncm_refresh", task))
                 self.ui_queue.put(("log", f"✗ 解密失败: {task.src} -> {e}"))
-            self.ui_queue.put(("ncm_total", (i + 1, total)))
-            self._end_job("ncm")
+
+        self._run_batch_parallel(tasks, run_one, "ncm", "ncm_total", "ncm_refresh")
 
     def _identify_and_rewrite(self, task, path: str, on_progress) -> str:
         """对缺标签的解密产物做指纹识别,补写标签并按需下载封面。
@@ -2032,12 +2108,15 @@ class App(ctk.CTk):
         try:
             task.status = "解析中…"
             self.ui_queue.put(("refresh", task))
-            fp = downloader.download_url(
-                task.url, task.out_dir, task.fmt,
-                on_status=on_status, on_progress=on_progress,
-                ffmpeg_location=self.ffmpeg,
-                sample_rate=sample_rate,
-            )
+            # 信号量限制同时在跑的下载数:粘几十条链接时不会
+            # 几十个 yt-dlp + ffmpeg 一起抢网络和磁盘。
+            with self._dl_semaphore:
+                fp = downloader.download_url(
+                    task.url, task.out_dir, task.fmt,
+                    on_status=on_status, on_progress=on_progress,
+                    ffmpeg_location=self.ffmpeg,
+                    sample_rate=sample_rate,
+                )
             task.status = "完成"
             task.file_path = fp
             task.title = os.path.basename(fp)
@@ -2139,12 +2218,12 @@ class App(ctk.CTk):
             raise
 
     def _convert_worker(self, tasks: list[converter.ConvertTask]):
-        total = len(tasks)
         # 批次开始时锁定采样率,避免用户在转码中途改动下拉框影响同一批任务。
         sample_rate = self._cv_sample_rate()
         rate_desc = self._rate_desc(sample_rate)
         self.ui_queue.put(("log", f"转码批次开始 · {len(tasks)} 个文件 · {rate_desc}"))
-        for i, task in enumerate(tasks):
+
+        def run_one(task):
             task.status = "转码中…"
             self.ui_queue.put(("cv_refresh", task))
 
@@ -2169,8 +2248,8 @@ class App(ctk.CTk):
                 task.error = str(e)
                 self.ui_queue.put(("cv_refresh", task))
                 self.ui_queue.put(("log", f"✗ 转码失败: {task.src} -> {e}"))
-            self.ui_queue.put(("cv_total", (i + 1, total)))
-            self._end_job("convert")
+
+        self._run_batch_parallel(tasks, run_one, "convert", "cv_total", "cv_refresh")
 
     # ---------- 窗口图标 ----------
     def _apply_window_icon(self):

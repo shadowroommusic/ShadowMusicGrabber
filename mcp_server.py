@@ -31,9 +31,9 @@ import converter  # noqa: E402
 import downloader  # noqa: E402
 import ncm_decrypt  # noqa: E402
 import qmc_decrypt  # noqa: E402
+from _version import __version__ as SERVER_VERSION  # noqa: E402
 
 SERVER_NAME = "shadow-musicgrabber"
-SERVER_VERSION = "1.13.0"  # keep in sync with pyproject.toml / main.py APP_VERSION
 PROTOCOL_VERSION = "2024-11-05"
 
 _ENCRYPTED_EXTS = {".ncm"} | set(qmc_decrypt.QMC_EXTS)
@@ -225,14 +225,21 @@ def tool_probe_audio(args: dict) -> dict:
 
 
 def _decrypt_one(
-    src: str, out_dir: str, fmt: str, reserved: set[str],
+    src: str,
+    out_dir: str,
+    fmt: str,
+    reserved: set[str],
     sample_rate: Optional[int] = None,
+    ffmpeg: Optional[str] = None,
 ) -> dict:
     ext = os.path.splitext(src)[1].lower()
     if ext == ".ncm":
         target = ncm_decrypt.make_output_path(src, out_dir, reserved)
+        # "original" 时内嵌 MP3 保留为 MP3;目标 flac/wav/mp3 时先解出 FLAC 再转。
         raw, meta = ncm_decrypt.decrypt_file(
-            src, target, ffmpeg=converter.find_ffmpeg(), rename_by_meta=True
+            src, target, ffmpeg=ffmpeg or converter.find_ffmpeg(),
+            rename_by_meta=True,
+            output_fmt="original" if fmt == "original" else "flac",
         )
     elif ext in qmc_decrypt.QMC_EXTS:
         target = qmc_decrypt.make_output_path(src, out_dir, reserved)
@@ -256,7 +263,7 @@ def _decrypt_one(
     if fmt != "original" or sample_rate:
         if sample_rate and fmt == "original":
             # 保持解密得到的容器与编码,只重采样。
-            converter.resample_in_place(raw, sample_rate, ffmpeg=converter.find_ffmpeg())
+            converter.resample_in_place(raw, sample_rate, ffmpeg=ffmpeg or converter.find_ffmpeg())
             result["output"] = raw
             result["format"] = "original"
             result["sample_rate"] = sample_rate
@@ -264,7 +271,7 @@ def _decrypt_one(
         stem = os.path.splitext(os.path.basename(raw))[0]
         target = _unique_path(out_dir, stem, f".{fmt}", reserved)
         converted = converter.convert_file(
-            raw, target, fmt, ffmpeg=converter.find_ffmpeg(), sample_rate=sample_rate
+            raw, target, fmt, ffmpeg=ffmpeg or converter.find_ffmpeg(), sample_rate=sample_rate
         )
         result["output"] = converted
         result["format"] = fmt
@@ -293,6 +300,8 @@ def tool_decrypt_many(args: dict) -> dict:
     sample_rate = _check_sample_rate(args.get("sample_rate"))
     out_dir = _resolve_out_dir(args.get("output_dir")) if args.get("output_dir") else None
     sources = _collect_encrypted(args.get("paths"))
+    # ffmpeg 定位一次复用到整批(找不到时每文件重扫 winget 目录树很慢)。
+    ffmpeg = converter.find_ffmpeg()
     reserved: set[str] = set()
     items = []
     for src in sources:
@@ -301,7 +310,7 @@ def tool_decrypt_many(args: dict) -> dict:
         last_error: Optional[Exception] = None
         for _attempt in range(2):
             try:
-                items.append(_decrypt_one(src, target_dir, fmt, reserved, sample_rate=sample_rate))
+                items.append(_decrypt_one(src, target_dir, fmt, reserved, sample_rate=sample_rate, ffmpeg=ffmpeg))
                 last_error = None
                 break
             except Exception as exc:
