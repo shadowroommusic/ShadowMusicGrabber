@@ -23,9 +23,10 @@ class TestFindFpcalc(unittest.TestCase):
                     self.assertEqual(fingerprint.find_fpcalc(), os.path.abspath(exe))
 
     def test_found_in_bin_subdir(self):
+        name = "fpcalc.exe" if os.name == "nt" else "fpcalc"
         with tempfile_dir() as td:
             os.makedirs(os.path.join(td, "bin"), exist_ok=True)
-            exe = os.path.join(td, "bin", "fpcalc.exe")
+            exe = os.path.join(td, "bin", name)
             open(exe, "wb").close()
             with mock.patch.dict(os.environ, {}, clear=True):
                 with mock.patch.object(fingerprint.shutil, "which", return_value=None), \

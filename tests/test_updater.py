@@ -69,7 +69,10 @@ class ReleaseParsingTests(unittest.TestCase):
                 },
             ],
         )
-        with mock.patch.object(updater, "_get_json", return_value=payload):
+        # .exe 优先是 Windows 的扩展名偏好,固定在 Windows 视角下断言。
+        with mock.patch.object(updater, "_get_json", return_value=payload), \
+                mock.patch.object(updater, "platform_tag", return_value="windows-x64"), \
+                mock.patch.object(updater, "_platform_exts", return_value=(".exe", ".zip")):
             info = updater.check_for_update("1.5.0")
         self.assertIsNotNone(info)
         self.assertEqual(info.tag, "v1.6.0")
@@ -224,7 +227,10 @@ class ApplyScriptTests(unittest.TestCase):
         self.assertEqual(calls[0][0][0], "wscript.exe")
         flags = calls[0][1].get("creationflags", 0)
         self.assertFalse(flags & getattr(updater.subprocess, "DETACHED_PROCESS", 0))
-        self.assertTrue(flags & getattr(updater.subprocess, "CREATE_NO_WINDOW", 0))
+        # CREATE_NO_WINDOW 只存在于 Windows;非 Windows 平台 flags 为 0 是预期行为。
+        no_window = getattr(updater.subprocess, "CREATE_NO_WINDOW", 0)
+        if no_window:
+            self.assertTrue(flags & no_window)
 
 
 if __name__ == "__main__":

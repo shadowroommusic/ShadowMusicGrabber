@@ -188,7 +188,7 @@ class DecryptRetryTests(unittest.TestCase):
 
         calls = []
 
-        def flaky(src, out_dir, fmt, reserved, sample_rate=None):
+        def flaky(src, out_dir, fmt, reserved, sample_rate=None, ffmpeg=None):
             calls.append(src)
             if len(calls) == 1:
                 raise RuntimeError("transient ffmpeg failure")

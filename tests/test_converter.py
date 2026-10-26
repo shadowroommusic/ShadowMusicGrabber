@@ -19,20 +19,27 @@ class TestFindFfmpeg(unittest.TestCase):
         self.assertTrue(os.path.exists(exe), f"路径应存在: {exe}")
 
     def test_find_ffprobe_next_to_ffmpeg(self):
+        ext = ".exe" if os.name == "nt" else ""
         with tempfile.TemporaryDirectory() as td:
-            ffmpeg = os.path.join(td, "ffmpeg.exe")
-            ffprobe = os.path.join(td, "ffprobe.exe")
+            ffmpeg = os.path.join(td, "ffmpeg" + ext)
+            ffprobe = os.path.join(td, "ffprobe" + ext)
             open(ffmpeg, "wb").close()
             open(ffprobe, "wb").close()
             self.assertEqual(converter.find_ffprobe(ffmpeg), os.path.abspath(ffprobe))
 
     def test_find_ffmpeg_in_pyinstaller_meipass(self):
+        ext = ".exe" if os.name == "nt" else ""
         with tempfile.TemporaryDirectory() as td:
-            bundled = os.path.join(td, "bin", "ffmpeg.exe")
+            bundled = os.path.join(td, "bin", "ffmpeg" + ext)
             os.makedirs(os.path.dirname(bundled), exist_ok=True)
             open(bundled, "wb").close()
+            # 把候选目录收敛到 MEIPASS,避免本机 bin/ 里恰好放了 ffmpeg 时干扰。
             with mock.patch.object(converter.shutil, "which", return_value=None), \
-                    mock.patch.object(converter.sys, "_MEIPASS", td, create=True):
+                    mock.patch.object(converter.sys, "_MEIPASS", td, create=True), \
+                    mock.patch.object(
+                        converter, "_app_dirs",
+                        return_value=[td, os.path.join(td, "bin")],
+                    ):
                 self.assertEqual(converter.find_ffmpeg(), os.path.abspath(bundled))
 
 
@@ -48,9 +55,18 @@ class TestIsSupported(unittest.TestCase):
 
 
 class TestBuildOutputPath(unittest.TestCase):
+    @unittest.skipUnless(os.name == "nt", "Windows 反斜杠路径语义")
     def test_basic(self):
         p = converter.build_output_path(r"C:\music\song.flac", r"C:\out", "wav")
         self.assertEqual(p, os.path.join(r"C:\out", "song.wav"))
+
+    def test_basic_portable(self):
+        src_dir = "C:/music" if os.name == "nt" else "/music"
+        out_dir = "C:/out" if os.name == "nt" else "/out"
+        p = converter.build_output_path(
+            os.path.join(src_dir, "song.flac"), out_dir, "wav"
+        )
+        self.assertEqual(p, os.path.join(out_dir, "song.wav"))
 
     def test_collision(self):
         os.makedirs("_ut_tmp", exist_ok=True)
@@ -160,7 +176,8 @@ class TestBitDepthPreservation(unittest.TestCase):
     def _bits(self, path: str) -> int:
         import json
         import subprocess
-        ffprobe = os.path.join(os.path.dirname(self.ff), "ffprobe.exe")
+        ffprobe = converter.find_ffprobe(self.ff)
+        self.assertTrue(ffprobe, "测试需要 ffprobe")
         out = subprocess.run(
             [ffprobe, "-v", "quiet", "-print_format", "json", "-show_streams", path],
             capture_output=True, text=True, timeout=20,
