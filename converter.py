@@ -7,7 +7,9 @@
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -15,6 +17,7 @@ import tempfile
 import threading
 from collections import deque
 from dataclasses import dataclass, field
+from functools import lru_cache
 from typing import Callable, Optional
 
 # 音频 + 视频容器: 视频会被 ffmpeg 提取音轨后转码(视频转音频页面与本地转码页共用)。
@@ -79,6 +82,20 @@ def _find_bundled_binary(name: str) -> Optional[str]:
     return None
 
 
+@lru_cache(maxsize=2)
+def _scan_winget_for_ffmpeg(winget_root: str) -> Optional[str]:
+    """在 WinGet 包目录里找 ffmpeg.exe。
+
+    整棵目录树可能非常大(数百个包 × 每包数层),按根路径缓存,
+    避免批量任务里每个文件都重扫一遍。
+    """
+    for root, _dirs, files in os.walk(winget_root):
+        for name in files:
+            if name.lower() == "ffmpeg.exe":
+                return os.path.abspath(os.path.join(root, name))
+    return None
+
+
 def find_ffmpeg() -> Optional[str]:
     """Locate ffmpeg on PATH, in packaged resources, or common Windows paths."""
     exe = shutil.which("ffmpeg") or _find_bundled_binary("ffmpeg")
@@ -94,10 +111,9 @@ def find_ffmpeg() -> Optional[str]:
         else ""
     )
     if winget_root and os.path.isdir(winget_root):
-        for root, _dirs, files in os.walk(winget_root):
-            for name in files:
-                if name.lower() == "ffmpeg.exe":
-                    return os.path.abspath(os.path.join(root, name))
+        found = _scan_winget_for_ffmpeg(winget_root)
+        if found:
+            return found
 
     for cand in (
         r"C:\ffmpeg\bin\ffmpeg.exe",
@@ -206,21 +222,54 @@ def staging_dir() -> str:
     return path
 
 
+_STAGING_LOCK = threading.Lock()
+# 已分配出去但文件还没落盘/还没被消费的暂存名(小写路径键)。
+# 只靠 exists() 判重在并行批次下不够:名字分配后到文件真正写出之间,
+# 其他线程会拿到同一个名字。
+_STAGING_LEASED: set[str] = set()
+
+
 def staging_path(name: str) -> str:
-    """在本地暂存目录里分配一个不冲突的路径。"""
-    return unique_path(os.path.join(staging_dir(), name))
+    """在本地暂存目录里分配一个不冲突的路径(线程安全,供并行批次使用)。
+
+    分配即"租约":即使文件尚未写出,其他线程也不会拿到同名路径;
+    消费完毕由 :func:`place_file` 释放租约。
+    """
+    with _STAGING_LOCK:
+        base = os.path.join(staging_dir(), name)
+        stem, ext = os.path.splitext(base)
+        candidate = base
+        index = 1
+        while (
+            os.path.exists(candidate)
+            or os.path.normcase(candidate) in _STAGING_LEASED
+        ):
+            candidate = f"{stem}_{index}{ext}"
+            index += 1
+        _STAGING_LEASED.add(os.path.normcase(candidate))
+        return candidate
+
+
+def _release_staging(path: str) -> None:
+    with _STAGING_LOCK:
+        _STAGING_LEASED.discard(os.path.normcase(path))
+
+
+_PLACE_LOCK = threading.Lock()
 
 
 def place_file(src: str, dest_dir: str, overwrite: bool = False) -> str:
     """把处理好的文件放到目标目录，返回最终路径。
 
     先写 ``.part`` 再原子替换，避免目标盘上留下半截文件；
-    overwrite=False 时自动避开同名文件。
+    overwrite=False 时自动避开同名文件。目标名的分配加了锁,
+    并行批次里同名成品不会互相覆盖。
     """
     os.makedirs(dest_dir, exist_ok=True)
-    target = os.path.join(dest_dir, os.path.basename(src))
-    if not overwrite:
-        target = unique_path(target)
+    with _PLACE_LOCK:
+        target = os.path.join(dest_dir, os.path.basename(src))
+        if not overwrite:
+            target = unique_path(target)
     tmp = f"{target}.part"
     try:
         shutil.copyfile(src, tmp)
@@ -231,15 +280,22 @@ def place_file(src: str, dest_dir: str, overwrite: bool = False) -> str:
                 os.remove(tmp)
             except OSError:
                 pass
-    try:
-        os.remove(src)
-    except OSError:
-        pass
+        try:
+            os.remove(src)
+        except OSError:
+            pass
+        # 暂存租约随消费结束而释放;非暂存来源这里是空操作。
+        _release_staging(src)
     return target
 
 
 class ConvertError(Exception):
     pass
+
+
+# FLAC 压缩级别。6 与 8 的体积差距约 0.5%,编码却快约一倍;
+# FLAC 是无损编码,级别不影响解码结果与音质。
+FLAC_COMPRESSION_LEVEL = 6
 
 
 # 常用输出采样率 (Hz)。None / 0 表示跟随源文件,不重采样。
@@ -417,12 +473,15 @@ def convert_file(
     dst_dir = os.path.dirname(dst) or "."
     os.makedirs(dst_dir, exist_ok=True)
 
+    # 一次探测同时拿到时长(进度条用)与 WAV 位深(编码器选择用),
+    # 不再为每个字段各拉一个 ffprobe 子进程。
+    media = probe_media(src, ffmpeg_exe)
     if fmt == "flac":
-        codec_args = ["-c:a", "flac", "-compression_level", "8"]
+        codec_args = ["-c:a", "flac", "-compression_level", str(FLAC_COMPRESSION_LEVEL)]
     elif fmt == "mp3":
         codec_args = ["-c:a", "libmp3lame", "-b:a", "320k"]
     else:  # wav - 跟随源位深,避免 24/32-bit 源被降为 16-bit
-        codec_args = _wav_codec_args(src, ffmpeg_exe)
+        codec_args = _wav_codec_args(src, ffmpeg_exe, media)
 
     # 采样率:不指定时完全跟随源文件,保证无损链路不引入任何重采样。
     rate_args: list[str] = []
@@ -469,7 +528,7 @@ def convert_file(
 
     # Probe before starting ffmpeg so its merged stderr/stdout pipe is drained
     # immediately after launch and cannot fill while a probe is running.
-    duration = _probe_duration(src, ffmpeg_exe)
+    duration = media.duration
     try:
         try:
             proc = subprocess.Popen(
@@ -485,7 +544,6 @@ def convert_file(
             raise ConvertError(f"无法启动 ffmpeg: {e}") from e
 
         assert proc.stdout is not None
-        import re
 
         time_re = re.compile(r"time=(\d+):(\d+):(\d+(?:\.\d+)?)")
 
@@ -543,7 +601,7 @@ def _resample_encoder_args(codec_name: str, bitrate: str = "") -> list[str]:
     """
     codec = (codec_name or "").lower()
     if codec == "flac":
-        return ["-c:a", "flac", "-compression_level", "8"]
+        return ["-c:a", "flac", "-compression_level", str(FLAC_COMPRESSION_LEVEL)]
     if codec.startswith("pcm") or codec == "wav":
         return ["-c:a", codec if codec.startswith("pcm") else "pcm_s16le"]
     if codec == "aac":
@@ -558,48 +616,95 @@ def _resample_encoder_args(codec_name: str, bitrate: str = "") -> list[str]:
     return ["-c:a", "aac", "-b:a", bitrate or "320k"]
 
 
-def _probe_audio_codec(path: str, ffmpeg: str) -> tuple[str, str]:
-    """返回 (codec_name, bit_rate);探测失败时返回空串,由调用方走兜底编码器。"""
-    import json
+@dataclass
+class MediaInfo:
+    """一次探测拿到的音频流信息;探测失败的字段保持默认值,由调用方兜底。"""
 
-    ffprobe = find_ffprobe(ffmpeg)
-    if not ffprobe:
-        return "", ""
+    duration: float = 0.0
+    sample_rate: int = 0
+    codec_name: str = ""
+    bit_rate: str = ""
+    sample_fmt: str = ""
+    bits_per_sample: int = 0
+
+
+def probe_media(path: str, ffmpeg: Optional[str] = None) -> MediaInfo:
+    """用一次 ffprobe 调用取回时长/采样率/编码/位深等全部信息。
+
+    旧实现对每个字段分别拉起一个 ffprobe 子进程(每个约 50-100ms),
+    大批量任务下纯属浪费;这里合并为一次调用,ffprobe 缺失时回退到
+    解析 ffmpeg stderr 的 Duration。
+    """
+    info = MediaInfo()
+    ffmpeg_exe = _resolve_executable(ffmpeg) if ffmpeg else find_ffmpeg()
+    ffprobe = find_ffprobe(ffmpeg_exe)
+    if ffprobe:
+        try:
+            out = subprocess.run(
+                [ffprobe, "-v", "quiet", "-print_format", "json",
+                 "-show_streams", "-show_format", path],
+                capture_output=True,
+                text=True,
+                timeout=20,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            ).stdout
+            data = json.loads(out)
+            for stream in data.get("streams", []):
+                if stream.get("codec_type") != "audio":
+                    continue
+                info.codec_name = str(stream.get("codec_name", "") or "")
+                info.bit_rate = str(stream.get("bit_rate", "") or "")
+                info.sample_fmt = str(stream.get("sample_fmt", "") or "")
+                try:
+                    info.bits_per_sample = int(
+                        stream.get("bits_per_raw_sample")
+                        or stream.get("bits_per_sample")
+                        or 0
+                    )
+                except (TypeError, ValueError):
+                    info.bits_per_sample = 0
+                rate = str(stream.get("sample_rate", "") or "")
+                if rate.isdigit():
+                    info.sample_rate = int(rate)
+                break
+            try:
+                info.duration = float((data.get("format") or {}).get("duration") or 0.0)
+            except (TypeError, ValueError):
+                info.duration = 0.0
+            return info
+        except Exception:  # noqa: BLE001 - 探测失败走 ffmpeg 兜底
+            pass
+    if ffmpeg_exe:
+        info.duration = _duration_from_ffmpeg(path, ffmpeg_exe)
+    return info
+
+
+def _duration_from_ffmpeg(path: str, ffmpeg_exe: str) -> float:
     try:
         out = subprocess.run(
-            [ffprobe, "-v", "quiet", "-print_format", "json", "-show_streams", path],
+            [ffmpeg_exe, "-hide_banner", "-nostdin", "-i", path],
             capture_output=True,
             text=True,
             timeout=20,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        ).stdout
-        for s in json.loads(out).get("streams", []):
-            if s.get("codec_type") == "audio":
-                return str(s.get("codec_name", "")), str(s.get("bit_rate", "") or "")
-    except Exception:  # noqa: BLE001 - 探测失败不应阻断重采样
+        )
+        m = re.search(r"Duration:\s*(\d+):(\d+):(\d+\.\d+)", out.stderr or "")
+        if m:
+            return int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
+    except Exception:  # noqa: BLE001
         pass
-    return "", ""
+    return 0.0
+
+
+def _probe_audio_codec(path: str, ffmpeg: str) -> tuple[str, str]:
+    """返回 (codec_name, bit_rate);探测失败时返回空串,由调用方走兜底编码器。"""
+    info = probe_media(path, ffmpeg)
+    return info.codec_name, info.bit_rate
 
 
 def _probe_sample_rate(path: str, ffmpeg: str) -> int:
     """读取音频流的采样率；失败返回 0。"""
-    ffprobe = find_ffprobe(ffmpeg)
-    if not ffprobe:
-        return 0
-    try:
-        out = subprocess.run(
-            [
-                ffprobe, "-v", "quiet", "-select_streams", "a:0",
-                "-show_entries", "stream=sample_rate", "-of", "csv=p=0", path,
-            ],
-            capture_output=True,
-            text=True,
-            timeout=20,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        ).stdout.strip().splitlines()
-        return int(out[0]) if out and out[0].strip().isdigit() else 0
-    except Exception:  # noqa: BLE001 - 探测失败时继续走重写路径
-        return 0
+    return probe_media(path, ffmpeg).sample_rate
 
 
 def resample_in_place(
@@ -628,7 +733,9 @@ def resample_in_place(
     if not ffmpeg_exe:
         raise ConvertError("未找到 ffmpeg,请先安装并加入 PATH")
 
-    current_rate = _probe_sample_rate(path, ffmpeg_exe)
+    # 一次探测同时拿到当前采样率(是否需要重写)与源编码族(重编码器选择)。
+    media = probe_media(path, ffmpeg_exe)
+    current_rate = media.sample_rate
     if current_rate == rate and not metadata and not cover:
         # 已经是目标采样率: 不重写文件, 省掉一次整文件 I/O。
         return path
@@ -649,7 +756,7 @@ def resample_in_place(
         codec_args = ["-c:a", "copy"]
     else:
         # 改变采样率必须重新编码:-c copy 流拷贝时 ffmpeg 会拒绝重采样。
-        codec_args = _resample_encoder_args(*_probe_audio_codec(path, ffmpeg_exe))
+        codec_args = _resample_encoder_args(media.codec_name, media.bit_rate)
 
     out_fmt = os.path.splitext(path)[1].lstrip(".").lower()
     cover_path: Optional[str] = None
@@ -685,7 +792,8 @@ def resample_in_place(
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=600,
+            # 不设超时:慢机器上长音频的高级别重采样可能远超 10 分钟,
+            # 超时会让本可成功的任务整体失败(与 convert_file 的行为对齐)。
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         if proc.returncode != 0:
@@ -789,71 +897,25 @@ def finalize_decrypted(
 
 def _probe_duration(path: str, ffmpeg: str) -> float:
     """用 ffprobe(或 ffmpeg)获取时长,失败返回 0。"""
-    import json
-    import re
-
-    ffprobe = find_ffprobe(ffmpeg)
-    if ffprobe:
-        try:
-            out = subprocess.run(
-                [ffprobe, "-v", "quiet", "-print_format", "json", "-show_format", path],
-                capture_output=True,
-                text=True,
-                timeout=20,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            ).stdout
-            return float(json.loads(out)["format"]["duration"])
-        except Exception:  # noqa: BLE001
-            pass
-    # 回退:解析 ffmpeg stderr 里的 Duration
-    try:
-        out = subprocess.run(
-            [ffmpeg, "-hide_banner", "-nostdin", "-i", path],
-            capture_output=True,
-            text=True,
-            timeout=20,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
-        m = re.search(r"Duration:\s*(\d+):(\d+):(\d+\.\d+)", out.stderr or "")
-        if m:
-            return int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
-    except Exception:  # noqa: BLE001
-        pass
-    return 0.0
+    return probe_media(path, ffmpeg).duration
 
 
-def _wav_codec_args(path: str, ffmpeg: str) -> list[str]:
+def _wav_codec_args(
+    path: str,
+    ffmpeg: str,
+    media: Optional[MediaInfo] = None,
+) -> list[str]:
     """根据源音频位深选择 WAV PCM 编码器,避免位深降级。
 
     16-bit -> pcm_s16le, 24-bit -> pcm_s24le, 32-bit int -> pcm_s32le,
     浮点 -> pcm_f32le, 探测失败回退 pcm_s16le。
+    ``media`` 可传入已探测的 :class:`MediaInfo`,避免重复拉起 ffprobe。
     """
-    import json
-
-    sample_fmt = ""
-    bits = 16
-    ffprobe = find_ffprobe(ffmpeg)
-    if ffprobe:
-        try:
-            out = subprocess.run(
-                [ffprobe, "-v", "quiet", "-print_format", "json", "-show_streams", path],
-                capture_output=True,
-                text=True,
-                timeout=20,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            )
-            streams = json.loads(out.stdout).get("streams", [])
-            for s in streams:
-                if s.get("codec_type") == "audio":
-                    sample_fmt = s.get("sample_fmt", "")
-                    bits = int(s.get("bits_per_raw_sample") or s.get("bits_per_sample") or 16)
-                    break
-        except Exception:  # noqa: BLE001
-            pass
-    if sample_fmt in ("flt", "fltp", "dbl", "dblp"):
+    media = media or probe_media(path, ffmpeg)
+    if media.sample_fmt in ("flt", "fltp", "dbl", "dblp"):
         return ["-c:a", "pcm_f32le"]
-    if bits >= 32:
+    if media.bits_per_sample >= 32:
         return ["-c:a", "pcm_s32le"]
-    if bits >= 24:
+    if media.bits_per_sample >= 24:
         return ["-c:a", "pcm_s24le"]
     return ["-c:a", "pcm_s16le"]
