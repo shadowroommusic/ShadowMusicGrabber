@@ -17,8 +17,9 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
         python: ["3.12"]
         include:
-          # requires-python >=3.9:在 Linux 上守住下限
-          - os: ubuntu-latest
+          # requires-python >=3.9:守住下限。3.9 已 EOL,ubuntu-latest(26.04)
+          # 的 setup-python 不再提供,固定到仍有 3.9 构建的 22.04。
+          - os: ubuntu-22.04
             python: "3.9"
     steps:
       - uses: actions/checkout@v4
@@ -59,6 +60,7 @@ jobs:
     name: build ${{ matrix.platform }}
     needs: test
     runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.optional || false }}
     strategy:
       fail-fast: false
       matrix:
@@ -69,9 +71,12 @@ jobs:
           - os: macos-latest
             platform: macos-arm64
             ext: .zip
+          # Intel runner(macos-13)在退役中、排队可能非常久:
+          # 尽力构建,失败/排不上不阻塞测试与发布(arm64 包是主流)。
           - os: macos-13
             platform: macos-x64
             ext: .zip
+            optional: true
     steps:
       - uses: actions/checkout@v4
 
@@ -87,11 +92,7 @@ jobs:
       - name: Export version
         shell: bash
         run: |
-          V=$(python - <<'PY'
-          import re
-          print(re.search(r'__version__ = "([^"]+)"', open("_version.py").read()).group(1))
-          PY
-          )
+          V=$(python -c "import _version; print(_version.__version__)")
           echo "VERSION=$V" >> "$GITHUB_ENV"
 
       - name: Build with PyInstaller
