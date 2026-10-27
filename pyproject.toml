@@ -24,6 +24,7 @@ gui = [
     "customtkinter>=5.2",
     "tkinterdnd2>=0.3",
     "pillow>=10",
+    "plyer>=2.1",
 ]
 
 

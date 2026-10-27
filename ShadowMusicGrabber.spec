@@ -30,6 +30,12 @@ datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 hiddenimports += ['tkinterdnd2', 'tkinterdnd2.TkinterDnD']
 # gamdl imports its Click entry point dynamically in the frozen build.
 hiddenimports += ['gamdl.cli', 'gamdl.cli.cli', 'Crypto.Cipher.AES', 'Crypto.Util.Padding', 'mutagen.flac']
+# plyer(系统通知)平台后端是动态导入的;未安装时跳过,程序自动退化为响铃。
+try:
+    tmp_ret = collect_all('plyer')
+    datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+except Exception:
+    pass
 
 
 a = Analysis(

@@ -7,3 +7,5 @@ pycryptodome>=3.20.0
 mutagen>=1.47.0
 requests>=2.28.0
 tkinterdnd2>=0.4.0
+# 批次完成的系统通知;平台不支持时安静退化为响铃+标题提示。
+plyer>=2.1.0

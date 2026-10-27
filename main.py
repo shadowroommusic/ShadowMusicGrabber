@@ -21,6 +21,7 @@ from typing import Optional
 
 import customtkinter as ctk
 
+import appsettings
 import converter
 import downloader
 import dragdrop
@@ -31,6 +32,7 @@ import premium
 import qmc_decrypt
 import updater
 from _version import __version__ as APP_VERSION
+from batching import BatchCancelled, BatchExecutor
 
 # 并行批次的线程数:XOR 解密与 ffmpeg 子进程都释放 GIL,
 # 2-4 个并发对大批量接近线性提速;太高会互相抢磁盘,得不偿失。
@@ -213,6 +215,13 @@ class App(ctk.CTk):
         self._rename_lock = threading.Lock()
         # 限制同时进行的下载数(每 URL 一个线程,这里统一闸门)。
         self._dl_semaphore = threading.BoundedSemaphore(DOWNLOAD_CONCURRENCY)
+        # 各模块的取消开关与批次执行器(取消按钮 → flag/executor)。
+        self._cancel_flags: dict[str, threading.Event] = {}
+        self._executors: dict[str, BatchExecutor] = {}
+        # 各模块的"启动类"按钮(运行中禁用)与取消按钮(运行中启用)。
+        self._job_buttons: dict[str, dict] = {}
+        # 空队列提示标签,按 tab 键索引。
+        self._empty_hints: dict[str, object] = {}
         self._closing = False
         self._update_busy = False
         self.ffmpeg = converter.find_ffmpeg()
@@ -230,6 +239,8 @@ class App(ctk.CTk):
         )
 
         self._build_ui()
+        self._apply_saved_settings()
+        self._register_setting_savers()
         self.after(30, self._drain_ui_queue)
         self._log(f"就绪。ffmpeg: {self.ffmpeg or '未找到(转码将不可用)'}")
         self._log("提示:仅处理你拥有或明确获授权的内容;不绕过 DRM、订阅、地区或访问限制。")
@@ -332,6 +343,8 @@ class App(ctk.CTk):
             return False
         self._running_jobs.add(name)
         self._job_remaining[name] = max(1, count)
+        self._cancel_flags[name] = threading.Event()
+        self._set_job_buttons(name, running=True)
         return True
 
     def _end_job(self, name: str):
@@ -344,6 +357,54 @@ class App(ctk.CTk):
             return
         self._job_remaining.pop(name, None)
         self._running_jobs.discard(name)
+        self._cancel_flags.pop(name, None)
+        self._executors.pop(name, None)
+        self._set_job_buttons(name, running=False)
+
+    def _set_job_buttons(self, name: str, running: bool) -> None:
+        """按运行状态切换模块按钮:启动类禁用/恢复,取消按钮反之。"""
+        entry = self._job_buttons.get(name)
+        if not entry:
+            return
+        state = "disabled" if running else "normal"
+        for button in entry.get("starts", []):
+            try:
+                button.configure(state=state)
+            except Exception:  # noqa: BLE001 - 控件已销毁
+                pass
+        cancel = entry.get("cancel")
+        if cancel is not None:
+            try:
+                cancel.configure(state="normal" if running else "disabled")
+                if not running:
+                    cancel.configure(text=i18n.tr("取消"))
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _register_job_buttons(self, name: str, starts: list, cancel=None) -> None:
+        self._job_buttons.setdefault(name, {"starts": [], "cancel": None})
+        self._job_buttons[name]["starts"].extend(starts)
+        if cancel is not None:
+            self._job_buttons[name]["cancel"] = cancel
+
+    def _request_cancel(self, name: str) -> None:
+        """取消按钮:置位标志;进行中的任务跑完当前文件即停。"""
+        flag = self._cancel_flags.get(name)
+        if flag is None:
+            return
+        flag.set()
+        entry = self._job_buttons.get(name, {})
+        cancel = entry.get("cancel")
+        if cancel is not None:
+            try:
+                cancel.configure(text=i18n.tr("停止中…"), state="disabled")
+            except Exception:  # noqa: BLE001
+                pass
+        self._log("已请求停止，等待进行中的任务结束…")
+
+    def _cancelled(self, name: str) -> bool:
+        flag = self._cancel_flags.get(name)
+        return flag is not None and flag.is_set()
 
     def _ensure_output_dir(self, value: str, purpose: str) -> str:
         """Create an output directory before a worker starts, with a GUI error."""
@@ -408,54 +469,106 @@ class App(ctk.CTk):
             self._last_progress_update[key] = now
             return True
 
-    def _run_batch_parallel(
-        self, jobs, run_one, name: str, total_kind: str, refresh_kind: str
+    def _run_batch(
+        self, jobs, run_one, name: str, total_kind: str, refresh_kind: str,
+        label_fn=None,
     ) -> None:
-        """并行执行一批任务:daemon 工作线程从一个队列取活,直到取空。
+        """并行执行一批任务(阻塞到收尾,含取消收尾)。
 
-        XOR 解密(PyCryptodome C 层)与 ffmpeg 子进程都释放 GIL,
-        2-4 并发对大批量接近线性提速。线程全部为 daemon,与旧的串行
-        worker 一致——退出程序时不会等待在途的 ffmpeg。
+        状态标记与 end_job 对账由 BatchExecutor 统一负责;run_one 抛出的
+        异常会转为该任务的"失败",BatchCancelled 转为"已取消"并停止派新任务。
         """
-        total = len(jobs)
-        work: queue.Queue = queue.Queue()
-        for job in jobs:
-            work.put(job)
-        state = {"done": 0}
-        lock = threading.Lock()
+        executor = BatchExecutor(
+            name=name,
+            workers=BATCH_WORKERS,
+            publish=self.ui_queue.put,
+            end_job=self._end_job,
+            total_kind=total_kind,
+            refresh_kind=refresh_kind,
+            logger=log,
+        )
+        self._executors[name] = executor
+        try:
+            executor.run(jobs, run_one, label_fn)
+        finally:
+            self._executors.pop(name, None)
 
-        def take_one():
-            while True:
-                try:
-                    task = work.get_nowait()
-                except queue.Empty:
-                    return
-                try:
-                    run_one(task)
-                except Exception as e:  # noqa: BLE001 - 单任务异常绝不拖垮整批
-                    log.exception("batch task failed: %r", task)
-                    try:
-                        task.status = "失败"
-                        task.error = str(e)
-                        self.ui_queue.put((refresh_kind, task))
-                    except Exception:  # noqa: BLE001
-                        pass
-                finally:
-                    with lock:
-                        state["done"] += 1
-                        done = state["done"]
-                    self.ui_queue.put((total_kind, (done, total)))
-                    self._end_job(name)
+    def _guard_progress(self, name: str, base):
+        """包装进度回调:批次被取消时抛 BatchCancelled,穿过解密/转码循环。"""
+        def guarded(p: float):
+            if self._cancelled(name):
+                raise BatchCancelled()
+            base(p)
+        return guarded
 
-        workers = max(1, min(BATCH_WORKERS, total))
-        threads = [
-            threading.Thread(target=take_one, daemon=True, name=f"batch-{name}-{i}")
-            for i in range(workers)
+    def _handle_batch_summary(self, name: str, stats: dict) -> None:
+        """批次收尾:日志汇总 + (窗口不在前台时)系统通知。"""
+        parts = [
+            i18n.tr(f"完成 {stats.get('succeeded', 0)}"),
+            i18n.tr(f"失败 {stats.get('failed', 0)}"),
         ]
-        for thread in threads:
-            thread.start()
-        for thread in threads:
-            thread.join()
+        if stats.get("cancelled"):
+            parts.append(i18n.tr(f"已取消 {stats['cancelled']}"))
+        summary = i18n.tr("批次结束") + " · " + " · ".join(parts)
+        self._log(f"✓ {summary}")
+        failed_labels = stats.get("failed_labels") or []
+        if failed_labels:
+            self._log(i18n.tr("失败文件:"))
+            for label in failed_labels[:10]:
+                self._log(f"  ✗ {label}")
+            if len(failed_labels) > 10:
+                self._log(i18n.tr(f"… 其余 {len(failed_labels) - 10} 个见上方日志"))
+        self._notify(i18n.tr("✓ 批次完成"), summary)
+
+    def _notify(self, title: str, body: str) -> None:
+        """系统通知;没有可用的通知后端时退化为响铃 + 标题栏提示。"""
+        try:
+            from plyer import notification
+
+            notification.notify(title=title, message=body, app_name=APP_NAME, timeout=6)
+            return
+        except Exception:  # noqa: BLE001 - plyer 缺失或平台不支持
+            pass
+        try:
+            original = self.title()
+            self.bell()
+            self.title(f"{title} — {body}")
+            self.after(6000, lambda: self._restore_title(original))
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _restore_title(self, original: str) -> None:
+        if not self._closing:
+            try:
+                self.title(original)
+            except Exception:  # noqa: BLE001
+                pass
+
+    # ---------- 空队列提示 ----------
+    def _add_empty_hint(self, container, key: str, text: str) -> None:
+        label = ctk.CTkLabel(
+            container, text=i18n.tr(text), anchor="center", justify="center",
+            text_color=MUTED, font=ctk.CTkFont(size=13),
+        )
+        label.pack(fill="both", expand=True, padx=12, pady=24)
+        self._empty_hints[key] = label
+
+    def _hide_empty_hint(self, key: str) -> None:
+        label = self._empty_hints.get(key)
+        if label is not None:
+            try:
+                label.pack_forget()
+            except Exception:  # noqa: BLE001 - 控件已销毁
+                pass
+
+    def _show_empty_hint(self, key: str) -> None:
+        label = self._empty_hints.get(key)
+        if label is not None:
+            try:
+                label.pack(fill="both", expand=True, padx=12, pady=24)
+                label.lift()
+            except Exception:  # noqa: BLE001
+                pass
 
     # ---------- UI 构建 ----------
     def _build_ui(self):
@@ -618,8 +731,14 @@ class App(ctk.CTk):
         btn_frame = ctk.CTkFrame(parent, fg_color="transparent")
         btn_frame.pack(fill="x", padx=10, pady=6)
         self._button(btn_frame, "解析第一条", self._probe, width=120).pack(side="left")
-        self._button(btn_frame, "开始下载", self._start_download, primary=True, width=140).pack(side="left", padx=8)
+        dl_start = self._button(btn_frame, "开始下载", self._start_download, primary=True, width=140)
+        dl_start.pack(side="left", padx=8)
+        dl_retry = self._button(btn_frame, "重试失败", self._retry_failed_downloads, width=100)
+        dl_retry.pack(side="left")
         self._button(btn_frame, "清空队列", self._clear_download_list, width=100).pack(side="left")
+        dl_cancel = self._button(btn_frame, "取消", lambda: self._request_cancel("download"), width=78)
+        dl_cancel.configure(state="disabled")
+        dl_cancel.pack(side="right")
 
         # 任务列表
         list_frame = ctk.CTkFrame(
@@ -632,6 +751,8 @@ class App(ctk.CTk):
             list_frame, height=180, fg_color="#0f0f10",
         )
         self.task_container.pack(fill="both", expand=True, padx=6, pady=6)
+        self._add_empty_hint(self.task_container, "download", "粘贴链接后点「开始下载」")
+        self._register_job_buttons("download", starts=[dl_start, dl_retry], cancel=dl_cancel)
 
     def _build_convert_tab(self, parent):
         self._guide(
@@ -694,8 +815,14 @@ class App(ctk.CTk):
         btn_frame = ctk.CTkFrame(parent, fg_color="transparent")
         btn_frame.pack(fill="x", padx=10, pady=6)
         self._button(btn_frame, "添加文件…", self._pick_convert_files, width=140).pack(side="left")
-        self._button(btn_frame, "开始转码", self._start_convert, primary=True, width=140).pack(side="left", padx=8)
+        cv_start = self._button(btn_frame, "开始转码", self._start_convert, primary=True, width=140)
+        cv_start.pack(side="left", padx=8)
+        cv_retry = self._button(btn_frame, "重试失败", lambda: self._start_convert(retry_only=True), width=100)
+        cv_retry.pack(side="left")
         self._button(btn_frame, "清空列表", self._clear_convert_list, width=100).pack(side="left")
+        cv_cancel = self._button(btn_frame, "取消", lambda: self._request_cancel("convert"), width=78)
+        cv_cancel.configure(state="disabled")
+        cv_cancel.pack(side="right")
 
         list_frame = ctk.CTkFrame(
             parent, corner_radius=6, fg_color=PANEL,
@@ -705,6 +832,8 @@ class App(ctk.CTk):
         ctk.CTkLabel(list_frame, text="转码队列", anchor="w").pack(fill="x", padx=8, pady=(6, 0))
         self.cv_container = ctk.CTkScrollableFrame(list_frame, fg_color="#0f0f10")
         self.cv_container.pack(fill="both", expand=True, padx=6, pady=6)
+        self._add_empty_hint(self.cv_container, "convert", "添加音频文件后开始转码")
+        self._register_job_buttons("convert", starts=[cv_start, cv_retry], cancel=cv_cancel)
 
         self.cv_tasks: list[converter.ConvertTask] = []
         self.cv_rows: list[TaskRow] = []
@@ -793,16 +922,23 @@ class App(ctk.CTk):
 
         btn = ctk.CTkFrame(parent, fg_color="transparent")
         btn.pack(fill="x", padx=10, pady=6)
-        self._button(
+        va_link_btn = self._button(
             btn, "从链接提取", self._start_va_links, primary=True, width=130
-        ).pack(side="left")
+        )
+        va_link_btn.pack(side="left")
         self._button(btn, "添加视频文件…", self._pick_va_files, width=150).pack(
             side="left", padx=8
         )
-        self._button(btn, "开始转换", self._start_va_files, width=110).pack(side="left")
-        self._button(btn, "清空列表", self._clear_va_list, width=100).pack(
-            side="left", padx=8
+        va_start = self._button(btn, "开始转换", self._start_va_files, width=110)
+        va_start.pack(side="left")
+        va_retry = self._button(
+            btn, "重试失败", lambda: self._start_va_files(retry_only=True), width=100
         )
+        va_retry.pack(side="left", padx=8)
+        self._button(btn, "清空列表", self._clear_va_list, width=100).pack(side="left")
+        va_cancel = self._button(btn, "取消", lambda: self._request_cancel("video"), width=78)
+        va_cancel.configure(state="disabled")
+        va_cancel.pack(side="right")
 
         list_frame = ctk.CTkFrame(
             parent, corner_radius=6, fg_color=PANEL,
@@ -823,6 +959,10 @@ class App(ctk.CTk):
         self.va_tasks: list = []
         self.va_rows: list[TaskRow] = []
         self.va_row_map: dict[int, TaskRow] = {}
+        self._add_empty_hint(self.va_container, "video", "拖入视频文件或点「添加视频文件…」")
+        self._register_job_buttons(
+            "video", starts=[va_link_btn, va_start, va_retry], cancel=va_cancel
+        )
         total_row = ctk.CTkFrame(parent, fg_color="transparent")
         total_row.pack(fill="x", padx=10, pady=(0, 4))
         ctk.CTkLabel(
@@ -891,6 +1031,7 @@ class App(ctk.CTk):
         self._va_add_files(files)
 
     def _va_add_files(self, paths) -> int:
+        self._hide_empty_hint("video")
         added = 0
         # 同批次内不同来源可能产出同名文件(如 A/song.mp4 与 B/song.mp4),
         # 必须用 reserved 集合去重,否则后一个任务会静默覆盖前一个的结果。
@@ -941,6 +1082,7 @@ class App(ctk.CTk):
             self._running_jobs.discard("video")
             self._job_remaining.pop("video", None)
             return
+        self._hide_empty_hint("video")
         kind = {
             "mp3": downloader.FormatKind.MP3,
             "wav": downloader.FormatKind.WAV,
@@ -960,14 +1102,20 @@ class App(ctk.CTk):
         self.va_progress_label.configure(text="0%")
         threading.Thread(target=self._va_worker, args=(tasks,), daemon=True).start()
 
-    def _start_va_files(self):
-        pending = [
-            t for t in self.va_tasks
-            if isinstance(t, converter.ConvertTask) and t.status != "完成"
-        ]
-        if not pending:
-            messagebox.showwarning("提示", "请先添加要转换的视频文件")
-            return
+    def _start_va_files(self, retry_only: bool = False):
+        if retry_only:
+            pending = [t for t in self.va_tasks if t.status == "失败"]
+            if not pending:
+                messagebox.showinfo("没有失败的任务", "当前队列里没有失败的任务。")
+                return
+        else:
+            pending = [
+                t for t in self.va_tasks
+                if isinstance(t, converter.ConvertTask) and t.status != "完成"
+            ]
+            if not pending:
+                messagebox.showwarning("提示", "请先添加要转换的视频文件")
+                return
         if not self._begin_job("video", len(pending)):
             return
         self.va_progress_bar.set(0)
@@ -983,42 +1131,39 @@ class App(ctk.CTk):
         def run_one(task):
             task.status = "处理中…"
             self.ui_queue.put(("va_refresh", task))
-            try:
-                if isinstance(task, downloader.DownloadTask):
-                    def on_dl_progress(p, speed, eta):
-                        task.update_progress(p, speed, eta)
-                        if self._progress_update_allowed(task):
-                            self.ui_queue.put(("va_progress", task))
+            if isinstance(task, downloader.DownloadTask):
+                def on_dl_progress(p, speed, eta):
+                    task.update_progress(p, speed, eta)
+                    if self._progress_update_allowed(task):
+                        self.ui_queue.put(("va_progress", task))
 
-                    done_path = downloader.download_url(
-                        task.url, task.out_dir, task.fmt,
-                        on_progress=on_dl_progress,
-                        ffmpeg_location=self.ffmpeg,
-                    )
-                    task.file_path = done_path
-                else:
-                    def on_cv_progress(p):
-                        task.set_progress(p)
-                        if self._progress_update_allowed(task):
-                            self.ui_queue.put(("va_progress", task))
+                done_path = downloader.download_url(
+                    task.url, task.out_dir, task.fmt,
+                    on_progress=on_dl_progress,
+                    ffmpeg_location=self.ffmpeg,
+                )
+                task.file_path = done_path
+            else:
+                def on_cv_progress(p):
+                    task.set_progress(p)
+                    if self._progress_update_allowed(task):
+                        self.ui_queue.put(("va_progress", task))
 
-                    done_path = converter.convert_file(
-                        task.src, task.dst, task.fmt,
-                        on_progress=on_cv_progress, ffmpeg=self.ffmpeg,
-                        sample_rate=sample_rate,
-                    )
-                    task.dst = done_path
-                task.status = "完成"
-                task.set_progress(100.0)
-                self.ui_queue.put(("va_refresh", task))
-                self.ui_queue.put(("log", f"✓ 已提取音频: {os.path.basename(done_path)}"))
-            except Exception as e:
-                task.status = "失败"
-                task.error = str(e)
-                self.ui_queue.put(("va_refresh", task))
-                self.ui_queue.put(("log", f"✗ 提取失败: {e}"))
+                done_path = converter.convert_file(
+                    task.src, task.dst, task.fmt,
+                    on_progress=self._guard_progress("video", on_cv_progress),
+                    ffmpeg=self.ffmpeg,
+                    sample_rate=sample_rate,
+                )
+                task.dst = done_path
+            task.set_progress(100.0)
+            self.ui_queue.put(("va_refresh", task))
+            self.ui_queue.put(("log", f"✓ 已提取音频: {os.path.basename(done_path)}"))
 
-        self._run_batch_parallel(tasks, run_one, "video", "va_total", "va_refresh")
+        self._run_batch(
+            tasks, run_one, "video", "va_total", "va_refresh",
+            label_fn=lambda t: getattr(t, "src", None) or getattr(t, "url", ""),
+        )
 
     def _clear_va_list(self):
         if not self._require_idle("video", "视频转音频队列"):
@@ -1028,6 +1173,7 @@ class App(ctk.CTk):
             row.frame.destroy()
         self.va_rows.clear()
         self.va_row_map.clear()
+        self._show_empty_hint("video")
         self.va_progress_bar.set(0)
         self.va_progress_label.configure(text="0%")
 
@@ -1176,8 +1322,14 @@ class App(ctk.CTk):
         btn_frame = ctk.CTkFrame(parent, fg_color="transparent")
         btn_frame.pack(fill="x", padx=10, pady=6)
         self._button(btn_frame, "添加加密文件…", self._pick_ncm_files, width=150).pack(side="left")
-        self._button(btn_frame, "开始解密", self._start_ncm_decrypt, primary=True, width=140).pack(side="left", padx=8)
+        ncm_start = self._button(btn_frame, "开始解密", self._start_ncm_decrypt, primary=True, width=140)
+        ncm_start.pack(side="left", padx=8)
+        ncm_retry = self._button(btn_frame, "重试失败", lambda: self._start_ncm_decrypt(retry_only=True), width=100)
+        ncm_retry.pack(side="left")
         self._button(btn_frame, "清空列表", self._clear_ncm_list, width=100).pack(side="left")
+        ncm_cancel = self._button(btn_frame, "取消", lambda: self._request_cancel("ncm"), width=78)
+        ncm_cancel.configure(state="disabled")
+        ncm_cancel.pack(side="right")
 
         list_frame = ctk.CTkFrame(
             parent, corner_radius=6, fg_color=PANEL,
@@ -1209,6 +1361,8 @@ class App(ctk.CTk):
         # 解密队列混合 NcmTask 与 QmcTask(两者接口一致)
         self.ncm_tasks: list = []
         self.ncm_rows: list[TaskRow] = []
+        self._add_empty_hint(self.ncm_container, "ncm", "拖入加密文件或文件夹，或点「添加加密文件…」")
+        self._register_job_buttons("ncm", starts=[ncm_start, ncm_retry], cancel=ncm_cancel)
         total_row = ctk.CTkFrame(parent, fg_color="transparent")
         total_row.pack(fill="x", padx=10, pady=(0, 4))
         ctk.CTkLabel(
@@ -1363,17 +1517,24 @@ class App(ctk.CTk):
             row.frame.destroy()
         self.ncm_rows.clear()
         self.ncm_row_map.clear()
+        self._show_empty_hint("ncm")
         self.ncm_progress_bar.set(0)
         self.ncm_progress_label.configure(text="0%")
 
-    def _start_ncm_decrypt(self):
+    def _start_ncm_decrypt(self, retry_only: bool = False):
         if not self.ncm_tasks:
             messagebox.showwarning("提示", "请先添加要解密的文件")
             return
-        pending = [task for task in self.ncm_tasks if task.status != "完成"]
-        if not pending:
-            messagebox.showinfo("没有待处理任务", "当前解密队列中的文件都已完成。若要重新解密,请清空队列后重新添加。")
-            return
+        if retry_only:
+            pending = [task for task in self.ncm_tasks if task.status == "失败"]
+            if not pending:
+                messagebox.showinfo("没有失败的任务", "当前解密队列里没有失败的任务。")
+                return
+        else:
+            pending = [task for task in self.ncm_tasks if task.status != "完成"]
+            if not pending:
+                messagebox.showinfo("没有待处理任务", "当前解密队列中的文件都已完成。若要重新解密,请清空队列后重新添加。")
+                return
         target_fmt = self.decrypt_fmt_var.get() or "original"
         if target_fmt not in DECRYPT_TARGET_FORMATS:
             target_fmt = "original"
@@ -1474,6 +1635,8 @@ class App(ctk.CTk):
                 if self._progress_update_allowed(task):
                     self.ui_queue.put(("ncm_progress", task))
 
+            on_progress = self._guard_progress("ncm", on_progress)
+
             try:
                 t_start = time.perf_counter()
                 # 可移动盘/网络盘：先在本机暂存目录完成全部处理，最后只复制成品，
@@ -1565,7 +1728,6 @@ class App(ctk.CTk):
                         dst, time.perf_counter() - t_copy,
                     )
                 task.dst = dst
-                task.status = "完成"
                 task.set_progress(100.0)
                 self.ui_queue.put(("ncm_refresh", task))
                 name = getattr(meta, "music_name", "") or os.path.basename(dst)
@@ -1578,14 +1740,18 @@ class App(ctk.CTk):
                     time.perf_counter() - t_start,
                     use_staging,
                 )
+            except BatchCancelled:
+                self.ui_queue.put(("log", f"· 已取消: {os.path.basename(task.src)}"))
+                raise
             except Exception as e:
-                task.status = "失败"
-                task.error = str(e)
                 log.exception("decrypt failed: %s", task.src)
-                self.ui_queue.put(("ncm_refresh", task))
                 self.ui_queue.put(("log", f"✗ 解密失败: {task.src} -> {e}"))
+                raise
 
-        self._run_batch_parallel(tasks, run_one, "ncm", "ncm_total", "ncm_refresh")
+        self._run_batch(
+            tasks, run_one, "ncm", "ncm_total", "ncm_refresh",
+            label_fn=lambda t: getattr(t, "src", ""),
+        )
 
     def _identify_and_rewrite(self, task, path: str, on_progress) -> str:
         """对缺标签的解密产物做指纹识别,补写标签并按需下载封面。
@@ -2046,6 +2212,7 @@ class App(ctk.CTk):
         fmt = self._selected_download_format()
         sample_rate = self._dl_sample_rate()
         rate_desc = self._rate_desc(sample_rate)
+        self._hide_empty_hint("download")
         try:
             for url in urls:
                 task = downloader.DownloadTask(url=url, out_dir=out_dir, fmt=fmt, title=url)
@@ -2080,6 +2247,20 @@ class App(ctk.CTk):
             row.frame.destroy()
         self.task_rows.clear()
         self.task_row_map.clear()
+        self._show_empty_hint("download")
+
+    def _retry_failed_downloads(self):
+        """只重跑下载队列里失败的任务(不重新添加行)。"""
+        failed = [task for task in self.tasks if task.status == "失败"]
+        if not failed:
+            messagebox.showinfo("没有失败的任务", "当前下载队列里没有失败的任务。")
+            return
+        if not self._begin_job("download", len(failed)):
+            return
+        for task in failed:
+            self._reset_task_for_run(task)
+            self.ui_queue.put(("refresh", task))
+            threading.Thread(target=self._download_worker, args=(task,), daemon=True).start()
 
     def _reset_task_for_run(self, task):
         task.status = "排队中"
@@ -2111,6 +2292,11 @@ class App(ctk.CTk):
             # 信号量限制同时在跑的下载数:粘几十条链接时不会
             # 几十个 yt-dlp + ffmpeg 一起抢网络和磁盘。
             with self._dl_semaphore:
+                if self._cancelled("download"):
+                    # 排到闸门时批次已被取消:直接标记,不再下载。
+                    task.status = "已取消"
+                    self.ui_queue.put(("refresh", task))
+                    return
                 fp = downloader.download_url(
                     task.url, task.out_dir, task.fmt,
                     on_status=on_status, on_progress=on_progress,
@@ -2166,6 +2352,7 @@ class App(ctk.CTk):
         self._log(f"已添加 {len(files)} 个转码文件")
 
     def _add_cv_row(self, task: converter.ConvertTask):
+        self._hide_empty_hint("convert")
         row = TaskRow(self.cv_container, task)
         row.title_lbl.configure(text=os.path.basename(task.src), width=400)
         row.status_lbl.configure(text="排队中")
@@ -2180,20 +2367,27 @@ class App(ctk.CTk):
             row.frame.destroy()
         self.cv_rows.clear()
         self.cv_row_map.clear()
+        self._show_empty_hint("convert")
         self.cv_progress_bar.set(0)
         self.cv_progress_label.configure(text="0%")
 
-    def _start_convert(self):
+    def _start_convert(self, retry_only: bool = False):
         if not self.cv_tasks:
             messagebox.showwarning("提示", "请先添加要转码的文件")
             return
         if not self.ffmpeg:
             messagebox.showerror("错误", "未找到 ffmpeg,无法转码。请先安装 ffmpeg 并加入 PATH。")
             return
-        pending = [task for task in self.cv_tasks if task.status != "完成"]
-        if not pending:
-            messagebox.showinfo("没有待处理任务", "当前转码队列中的文件都已完成。若要重新转码,请清空队列后重新添加。")
-            return
+        if retry_only:
+            pending = [task for task in self.cv_tasks if task.status == "失败"]
+            if not pending:
+                messagebox.showinfo("没有失败的任务", "当前转码队列里没有失败的任务。")
+                return
+        else:
+            pending = [task for task in self.cv_tasks if task.status != "完成"]
+            if not pending:
+                messagebox.showinfo("没有待处理任务", "当前转码队列中的文件都已完成。若要重新转码,请清空队列后重新添加。")
+                return
         if not self._begin_job("convert", len(pending)):
             return
         self.cv_progress_bar.set(0)
@@ -2232,24 +2426,140 @@ class App(ctk.CTk):
                 if self._progress_update_allowed(task):
                     self.ui_queue.put(("cv_progress", task))
 
-            try:
-                converter.convert_file(
-                    task.src, task.dst, task.fmt,
-                    on_progress=on_progress,
-                    ffmpeg=self.ffmpeg,
-                    sample_rate=sample_rate,
-                )
-                task.status = "完成"
-                task.set_progress(100.0)
-                self.ui_queue.put(("cv_refresh", task))
-                self.ui_queue.put(("log", f"✓ 转码完成: {task.dst}"))
-            except Exception as e:
-                task.status = "失败"
-                task.error = str(e)
-                self.ui_queue.put(("cv_refresh", task))
-                self.ui_queue.put(("log", f"✗ 转码失败: {task.src} -> {e}"))
+            converter.convert_file(
+                task.src, task.dst, task.fmt,
+                on_progress=self._guard_progress("convert", on_progress),
+                ffmpeg=self.ffmpeg,
+                sample_rate=sample_rate,
+            )
+            task.set_progress(100.0)
+            self.ui_queue.put(("cv_refresh", task))
+            self.ui_queue.put(("log", f"✓ 转码完成: {task.dst}"))
 
-        self._run_batch_parallel(tasks, run_one, "convert", "cv_total", "cv_refresh")
+        self._run_batch(
+            tasks, run_one, "convert", "cv_total", "cv_refresh",
+            label_fn=lambda t: getattr(t, "src", ""),
+        )
+
+    # ---------- 界面设置持久化 ----------
+    def _apply_saved_settings(self) -> None:
+        """启动时恢复上次的输出目录/格式/采样率/开关;凭据不存不读。"""
+
+        def saved(key):
+            return appsettings.get(key)
+
+        for var, key in (
+            (self.out_dir_var, "dl_out_dir"),
+            (self.cv_out_var, "cv_out_dir"),
+            (self.ncm_out_var, "ncm_out_dir"),
+            (self.va_out_var, "va_out_dir"),
+            (self.am_out_dir_var, "am_out_dir"),
+            (self.bp_out_dir_var, "bp_out_dir"),
+            (self.am_cookies_var, "am_cookies"),
+        ):
+            value = saved(key)
+            if value:
+                var.set(value)
+
+        fmt = saved("dl_fmt")
+        for kind, label in FORMAT_LABELS.items():
+            if kind.value == fmt:
+                self.fmt_var.set(i18n.tr(label))
+                break
+        if saved("cv_fmt"):
+            self.cv_fmt_var.set(saved("cv_fmt"))
+        if saved("va_fmt"):
+            self.va_fmt_var.set(saved("va_fmt"))
+
+        for label, value in DECRYPT_FORMAT_LABELS.items():
+            if value == saved("ncm_fmt"):
+                self.decrypt_fmt_var.set(value)
+                self.decrypt_fmt_label_var.set(i18n.tr(label))
+                break
+        for label, value in DECRYPT_EXISTS_LABELS.items():
+            if value == saved("ncm_exists"):
+                self.decrypt_exists_var.set(value)
+                self.decrypt_exists_label_var.set(i18n.tr(label))
+                break
+
+        for var, label_var, key in (
+            (self.dl_rate_var, self.dl_rate_label_var, "dl_rate"),
+            (self.cv_rate_var, self.cv_rate_label_var, "cv_rate"),
+            (self.ncm_rate_var, self.ncm_rate_label_var, "ncm_rate"),
+            (self.va_rate_var, self.va_rate_label_var, "va_rate"),
+        ):
+            value = saved(key)
+            if value in CV_SAMPLE_RATE_LABELS:
+                var.set(value)
+                label_var.set(i18n.tr(CV_SAMPLE_RATE_LABELS[value]))
+
+        if saved("ncm_rename") is not None:
+            self.rename_var.set(bool(saved("ncm_rename")))
+        if saved("ncm_fp") is not None:
+            self.fp_var.set(bool(saved("ncm_fp")))
+        if saved("acoustid_key"):
+            self.fp_key_var.set(saved("acoustid_key"))
+
+        for label, value in premium.GAMDL_CODECS.items():
+            if value == saved("am_codec"):
+                self.am_codec_var.set(value)
+                self.am_codec_label_var.set(i18n.tr(label))
+                break
+        for label, entry in premium.BEATPORT_QUALITIES.items():
+            if entry[0] == saved("bp_quality"):
+                self.bp_quality_var.set(entry[0])
+                self.bp_quality_label_var.set(i18n.tr(label))
+                break
+
+        # var.set 不会触发开关的 command,这里手动同步一次状态。
+        self.rename_by_meta = bool(self.rename_var.get())
+        self.fingerprint_enabled = bool(self.fp_var.get())
+        self.fingerprint_key = self.fp_key_var.get().strip()
+
+    def _register_setting_savers(self) -> None:
+        """控件变化即写回设置文件(键值很小,直接写,不加防抖)。"""
+
+        def bind_string(var, key):
+            var.trace_add("write", lambda *_: appsettings.set(key, var.get()))
+
+        def bind_bool(var, key):
+            var.trace_add(
+                "write", lambda *_: appsettings.set(key, bool(var.get()))
+            )
+
+        for var, key in (
+            (self.out_dir_var, "dl_out_dir"),
+            (self.cv_out_var, "cv_out_dir"),
+            (self.ncm_out_var, "ncm_out_dir"),
+            (self.va_out_var, "va_out_dir"),
+            (self.am_out_dir_var, "am_out_dir"),
+            (self.bp_out_dir_var, "bp_out_dir"),
+            (self.am_cookies_var, "am_cookies"),
+            (self.cv_fmt_var, "cv_fmt"),
+            (self.va_fmt_var, "va_fmt"),
+            (self.decrypt_fmt_var, "ncm_fmt"),
+            (self.decrypt_exists_var, "ncm_exists"),
+            (self.dl_rate_var, "dl_rate"),
+            (self.cv_rate_var, "cv_rate"),
+            (self.ncm_rate_var, "ncm_rate"),
+            (self.va_rate_var, "va_rate"),
+            (self.fp_key_var, "acoustid_key"),
+            (self.am_codec_var, "am_codec"),
+            (self.bp_quality_var, "bp_quality"),
+        ):
+            bind_string(var, key)
+        for var, key in (
+            (self.rename_var, "ncm_rename"),
+            (self.fp_var, "ncm_fp"),
+        ):
+            bind_bool(var, key)
+        # 下载格式下拉框存的是译文,保存时换算回内部值。
+        self.fmt_var.trace_add(
+            "write",
+            lambda *_: appsettings.set(
+                "dl_fmt", self._selected_download_format().value
+            ),
+        )
 
     # ---------- 窗口图标 ----------
     def _apply_window_icon(self):
@@ -2382,6 +2692,7 @@ class App(ctk.CTk):
 
     def _create_ncm_rows_in_batches(self, tasks: list, batch: int = 12) -> None:
         """分批创建任务行: 一次几百个控件会把主线程卡住。"""
+        self._hide_empty_hint("ncm")
         chunk, rest = tasks[:batch], tasks[batch:]
         for task in chunk:
             row = TaskRow(self.ncm_container, task)
@@ -2452,6 +2763,8 @@ class App(ctk.CTk):
                     messagebox.showinfo("凭据自检", "\n".join(msg[1]))
                 elif kind == "job_done":
                     self._finish_job(msg[1])
+                elif kind == "batch_summary":
+                    self._handle_batch_summary(msg[1], msg[2])
                 elif kind == "update_error":
                     self._update_busy = False
                     self._set_update_ui(busy=False)

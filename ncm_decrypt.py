@@ -643,10 +643,22 @@ def _transcode_to_flac(
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
     assert proc.stdout is not None
-    for _ in proc.stdout:
-        pass
-    proc.stdout.close()
-    rc = proc.wait()
+    try:
+        try:
+            for _ in proc.stdout:
+                pass
+        finally:
+            proc.stdout.close()
+        rc = proc.wait()
+    except BaseException:
+        # 取消等异常穿过读取循环时杀掉 ffmpeg,不留孤儿进程。
+        if proc.poll() is None:
+            try:
+                proc.kill()
+                proc.wait(timeout=5)
+            except Exception:  # noqa: BLE001
+                pass
+        raise
     if rc != 0 or not os.path.exists(dst):
         raise NcmError(f"ffmpeg 转码失败(退出码 {rc})")
 

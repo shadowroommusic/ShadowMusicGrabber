@@ -548,22 +548,32 @@ def convert_file(
         time_re = re.compile(r"time=(\d+):(\d+):(\d+(?:\.\d+)?)")
 
         try:
-            for raw in proc.stdout:
-                line = raw.rstrip()
-                if line:
-                    tail.append(line[-500:])
-                if on_line:
-                    on_line(line)
-                m = time_re.search(line)
-                if m and duration:
-                    secs = int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
-                    pct = min(99.0, secs / duration * 100.0)
-                    if on_progress:
-                        on_progress(pct)
-        finally:
-            proc.stdout.close()
-
-        rc = proc.wait()
+            try:
+                for raw in proc.stdout:
+                    line = raw.rstrip()
+                    if line:
+                        tail.append(line[-500:])
+                    if on_line:
+                        on_line(line)
+                    m = time_re.search(line)
+                    if m and duration:
+                        secs = int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
+                        pct = min(99.0, secs / duration * 100.0)
+                        if on_progress:
+                            on_progress(pct)
+            finally:
+                proc.stdout.close()
+            rc = proc.wait()
+        except BaseException:
+            # 进度回调里抛出(如用户取消)时,必须杀掉 ffmpeg 子进程,
+            # 否则它会变成继续写临时文件的孤儿进程。
+            if proc.poll() is None:
+                try:
+                    proc.kill()
+                    proc.wait(timeout=5)
+                except Exception:  # noqa: BLE001 - 尽力而为
+                    pass
+            raise
         if rc != 0:
             detail = " | ".join(tail)
             suffix = f": {detail}" if detail else ""
