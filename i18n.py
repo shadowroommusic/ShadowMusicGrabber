@@ -624,6 +624,17 @@ def _reverse_table() -> dict:
     return _REVERSE
 
 
+def to_source(text: str) -> str:
+    """把当前显示文字还原成中文原文,无论当前是哪种语言。
+
+    untr 在中文模式下是恒等(中文界面显示的就是原文),热切换重翻译需要
+    一个与当前语言无关的反查:英文译文 → 中文原文,其余原样返回。
+    """
+    if not isinstance(text, str):
+        return text
+    return _reverse_table().get(text, text)
+
+
 def untr(text: str) -> str:
     """把已翻译的界面文字还原成中文原文（下拉框回读时用）。"""
     if not isinstance(text, str):
