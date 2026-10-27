@@ -2609,6 +2609,17 @@ class App(ctk.CTk):
                 self.bp_quality_label_var.set(i18n.tr(label))
                 break
 
+        # 采样率显示值: StringVar 不经过 i18n 的构造钩子,启动时统一翻译。
+        for var, label_var in (
+            (self.dl_rate_var, self.dl_rate_label_var),
+            (self.cv_rate_var, self.cv_rate_label_var),
+            (self.ncm_rate_var, self.ncm_rate_label_var),
+            (self.va_rate_var, self.va_rate_label_var),
+        ):
+            value = var.get()
+            if value in CV_SAMPLE_RATE_LABELS:
+                label_var.set(i18n.tr(CV_SAMPLE_RATE_LABELS[value]))
+
         # var.set 不会触发开关的 command,这里手动同步一次状态。
         self.rename_by_meta = bool(self.rename_var.get())
         self.fingerprint_enabled = bool(self.fp_var.get())
@@ -2684,12 +2695,12 @@ class App(ctk.CTk):
             self.fmt_var, self.decrypt_fmt_label_var, self.decrypt_exists_label_var,
             self.am_codec_label_var, self.bp_quality_label_var,
         ):
-            var.set(i18n.tr(i18n.untr(var.get())))
+            var.set(i18n.tr(i18n.to_source(var.get())))
         for label_var in (
             self.dl_rate_label_var, self.cv_rate_label_var,
             self.ncm_rate_label_var, self.va_rate_label_var,
         ):
-            label_var.set(i18n.tr(i18n.untr(label_var.get())))
+            label_var.set(i18n.tr(i18n.to_source(label_var.get())))
         self._log(i18n.tr("语言已切换,即时生效"))
 
     def _retranslate_widget(self, widget):
@@ -2706,18 +2717,18 @@ class App(ctk.CTk):
         kind = type(widget).__name__
         try:
             if kind in ("CTkLabel", "CTkButton", "CTkSwitch", "CTkCheckBox", "CTkRadioButton"):
-                widget.configure(text=i18n.tr(i18n.untr(widget.cget("text"))))
+                widget.configure(text=i18n.tr(i18n.to_source(widget.cget("text"))))
             elif kind == "CTkEntry":
                 widget.configure(
-                    placeholder_text=i18n.tr(i18n.untr(widget.cget("placeholder_text")))
+                    placeholder_text=i18n.tr(i18n.to_source(widget.cget("placeholder_text")))
                 )
             elif kind == "CTkOptionMenu":
-                values = [i18n.tr(i18n.untr(v)) for v in widget.cget("values") or []]
+                values = [i18n.tr(i18n.to_source(v)) for v in widget.cget("values") or []]
                 if values:
                     widget.configure(values=values)
             elif kind == "CTkTabview":
                 for key, button in (widget._segmented_button._buttons_dict or {}).items():
-                    button.configure(text=i18n.tr(i18n.untr(key)))
+                    button.configure(text=i18n.tr(i18n.to_source(key)))
         except Exception:  # noqa: BLE001 - 个别控件不支持时跳过
             pass
 

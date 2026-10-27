@@ -84,6 +84,11 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt pyinstaller
 
+      - name: Fetch static ffmpeg/ffprobe into bin/
+        run: |
+          python -m pip install static-ffmpeg
+          python -c "import os, shutil; from static_ffmpeg import run; ff, fp = run.get_or_fetch_platform_executables_else_raise(); os.makedirs('bin', exist_ok=True); shutil.copy(ff, os.path.join('bin', os.path.basename(ff))); shutil.copy(fp, os.path.join('bin', os.path.basename(fp))); print('bundled:', ff, fp)"
+
       - name: Export version
         shell: bash
         run: |

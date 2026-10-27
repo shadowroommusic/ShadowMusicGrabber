@@ -5,6 +5,14 @@ from PyInstaller.utils.hooks import collect_all
 
 datas = [('assets/icon.ico', 'assets')]
 binaries = []
+# ffmpeg/ffprobe 静态二进制: bin/ 里有(平台对应名字)就打包进 EXE/App,
+# 用户开箱即用,不再需要自行安装 ffmpeg。CI 构建前会用 static-ffmpeg 填充 bin/。
+_ffmpeg = os.path.join("bin", "ffmpeg.exe" if os.name == "nt" else "ffmpeg")
+_ffprobe = os.path.join("bin", "ffprobe.exe" if os.name == "nt" else "ffprobe")
+if os.path.isfile(_ffmpeg):
+    binaries.append((_ffmpeg, "bin"))
+if os.path.isfile(_ffprobe):
+    binaries.append((_ffprobe, "bin"))
 # beatportdl.exe 是第三方下载器, 不随仓库分发; 本地存在时才打包进 EXE。
 _beatportdl = os.path.join("bin", "beatportdl.exe")
 if os.path.isfile(_beatportdl):
