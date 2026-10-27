@@ -56,7 +56,8 @@ python -m pip install -r requirements.txt
 python main.py
 ```
 
-需要 Python 3.10+ 与可用的 FFmpeg，可用 `winget install Gyan.FFmpeg` 安装。程序会自动查找 PATH、程序目录、PyInstaller 临时目录和常见 WinGet 路径中的 `ffmpeg` / `ffprobe`。
+需要 Python 3.10+ 与可用的 FFmpeg，可用 `winget install Gyan.FFmpeg` 安装。
+> ⚠️ **macOS 用户注意**：不要用系统自带的 `python3`（Xcode CLT 的 3.9 捆绑 Tk 8.5，在新 macOS 上窗口会渲染成黑屏）。请用 [python.org](https://www.python.org/downloads/macos/) 3.10+ 或 Homebrew/uv 安装的新 Python 来运行与打包。程序会自动查找 PATH、程序目录、PyInstaller 临时目录和常见 WinGet 路径中的 `ffmpeg` / `ffprobe`。
 
 ## 使用方式二：接入 AI Agent（MCP 服务）
 
