@@ -43,7 +43,7 @@ A Windows desktop toolbox with four independent modules: public link downloading
 | --- | --- |
 | Windows 64 位 | `ShadowMusicGrabber-<版本>-windows-x64.exe` |
 
-下载后直接运行，无需安装 Python。建议把 FFmpeg 放到 EXE 同目录（或在系统 PATH 中），否则下载/转码功能不可用。
+下载后直接运行，无需安装 Python，**ffmpeg 已内置**（静态编译进程序包），下载/转码/解密转码开箱即用。若你希望用自己安装的 ffmpeg，放在程序同目录或系统 PATH 中的版本会被优先使用。
 
 程序内也可以从旧版本升级：打开程序，点右上角 **检查更新**，会自动下载并替换为新版本。
 
@@ -56,7 +56,7 @@ python -m pip install -r requirements.txt
 python main.py
 ```
 
-需要 Python 3.10+ 与可用的 FFmpeg，可用 `winget install Gyan.FFmpeg` 安装。
+需要 Python 3.10+；FFmpeg 不再是硬性要求——`bin/` 目录里放了 ffmpeg/ffprobe（如用 [static-ffmpeg](https://pypi.org/project/static-ffmpeg/) 拉取）会随打包自动内置，没有时转码/下载功能仍需系统可找到 ffmpeg（`winget install Gyan.FFmpeg`）。
 > ⚠️ **macOS 用户注意**：不要用系统自带的 `python3`（Xcode CLT 的 3.9 捆绑 Tk 8.5，在新 macOS 上窗口会渲染成黑屏）。请用 [python.org](https://www.python.org/downloads/macos/) 3.10+ 或 Homebrew/uv 安装的新 Python 来运行与打包。程序会自动查找 PATH、程序目录、PyInstaller 临时目录和常见 WinGet 路径中的 `ffmpeg` / `ffprobe`。
 
 ## 使用方式二：接入 AI Agent（MCP 服务）
@@ -97,7 +97,7 @@ python main.py
 | `download_audio` | 从公开链接下载音频 |
 | `get_capabilities` | 查询版本、ffmpeg 状态与支持的格式 |
 
-解密与转码全部在本地完成；转码及部分下载格式需要系统能找到 ffmpeg（与桌面版要求相同）。
+解密与转码全部在本地完成。MCP 方式未内置 ffmpeg，转码及部分下载格式需要系统能找到 ffmpeg（桌面版已内置，无此要求）。
 
 ## 界面语言 / Language
 
@@ -195,7 +195,7 @@ python -m pytest tests -q
 pyinstaller --noconfirm --clean ShadowMusicGrabber.spec
 ```
 
-生成物为 `dist\ShadowMusicGrabber.exe`。spec 会收集 yt-dlp、customtkinter、gamdl、Crypto、mutagen、tkinterdnd2；`bin\beatportdl.exe` 存在时一并打包。FFmpeg 不复制进 EXE，请确保目标机器可找到它，或把 `ffmpeg.exe` / `ffprobe.exe` 放在 EXE 同目录。
+生成物为 `dist\ShadowMusicGrabber.exe`。spec 会收集 yt-dlp、customtkinter、gamdl、Crypto、mutagen、tkinterdnd2、plyer；`bin\` 里的 `ffmpeg`/`ffprobe`（Windows 为 .exe）与 `beatportdl.exe` 存在时一并内置。CI 构建时会自动用 static-ffmpeg 填充并打包。
 
 CI 会自动跑全平台测试矩阵（Ubuntu / Windows / macOS），并在每次推送时构建 `windows-x64.exe` 与 `macos-arm64.zip` 两份产物；推送 `v*` 标签时自动创建 GitHub Release 并附上这些资产，命名与程序内自动更新的约定一致（`ShadowMusicGrabber-<版本>-<平台>-<架构>.<扩展名>`）。发版只需要改 `_version.py` 一处版本号。Intel Mac（x64）的 GitHub 托管 runner 已退役、无法稳定构建，需要的话可在 Intel Mac 上按上面的本地构建步骤自行打包。
 
