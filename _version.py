@@ -6,4 +6,4 @@ main.py 的 APP_VERSION、mcp_server 的 SERVER_VERSION 和 pyproject.toml 的
 发版时只改这一处。
 """
 
-__version__ = "1.15.0"
+__version__ = "1.16.0"

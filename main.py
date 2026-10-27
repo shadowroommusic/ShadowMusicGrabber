@@ -134,6 +134,15 @@ DECRYPT_EXISTS_LABELS = {
 }
 
 
+def format_total_text(done: int, total: int, failed: int = 0) -> str:
+    """总进度标签的文字:3/10 · 30%(有失败时追加 · 失败 2)。"""
+    ratio = (done / total) if total else 0.0
+    text = i18n.tr(f"{done}/{total} · {ratio * 100:.0f}%")
+    if failed:
+        text += " · " + i18n.tr(f"失败 {failed}")
+    return text
+
+
 def resource_path(*parts: str) -> str:
     """定位随程序分发的资源（源码运行与 PyInstaller 打包都能用）。"""
     base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
@@ -150,9 +159,15 @@ def task_label(task) -> str:
 
 
 class TaskRow:
-    """下载任务行 UI。"""
+    """下载任务行 UI。可带「打开目录 / 移除」两个小操作(不传则不显示)。"""
 
-    def __init__(self, parent, task: downloader.DownloadTask):
+    STATUS_COLORS = {
+        "失败": "#ff6b6b",
+        "已取消": MUTED,
+        "已跳过": MUTED,
+    }
+
+    def __init__(self, parent, task, on_open=None, on_remove=None):
         self.task = task
         self.frame = ctk.CTkFrame(
             parent, corner_radius=6, fg_color=PANEL_ALT,
@@ -163,6 +178,22 @@ class TaskRow:
         top.pack(fill="x", padx=8, pady=(6, 0))
         self.title_lbl = ctk.CTkLabel(top, text=task_label(task), anchor="w")
         self.title_lbl.pack(side="left", fill="x", expand=True)
+        if on_open is not None:
+            ctk.CTkButton(
+                top, text=i18n.tr("打开目录"), width=24, height=20,
+                fg_color="transparent", hover_color=BUTTON_HOVER,
+                text_color=MUTED, corner_radius=4,
+                font=ctk.CTkFont(size=11),
+                command=on_open,
+            ).pack(side="right", padx=(4, 0))
+        if on_remove is not None:
+            ctk.CTkButton(
+                top, text=i18n.tr("移除"), width=24, height=20,
+                fg_color="transparent", hover_color=BUTTON_HOVER,
+                text_color=MUTED, corner_radius=4,
+                font=ctk.CTkFont(size=11),
+                command=on_remove,
+            ).pack(side="right")
         self.status_lbl = ctk.CTkLabel(top, text=task.status, width=150, anchor="e", text_color=MUTED)
         self.status_lbl.pack(side="right")
         self.progress = ctk.CTkProgressBar(
@@ -175,7 +206,11 @@ class TaskRow:
 
     def refresh(self):
         self.title_lbl.configure(text=task_label(self.task))
-        self.status_lbl.configure(text=self.task.status)
+        status = self.task.status
+        color = self.STATUS_COLORS.get(status)
+        if status == "完成":
+            color = ACCENT
+        self.status_lbl.configure(text=status, text_color=color or MUTED)
         self.progress.set(self.task.progress / 100.0)
         error = getattr(self.task, "error", "")
         if error:
@@ -445,6 +480,65 @@ class App(ctk.CTk):
                 subprocess.Popen(["xdg-open", LOG_DIR])
         except OSError as exc:
             messagebox.showerror("无法打开日志目录", f"{LOG_DIR}\n\n{exc}")
+
+    def _reveal_path(self, path: str) -> None:
+        """在系统文件管理器里显示文件(选中它)。"""
+        path = path or ""
+        if not os.path.exists(path):
+            messagebox.showinfo("提示", "文件还不存在(任务未完成或已失败)。")
+            return
+        try:
+            if os.name == "nt":
+                os.startfile(os.path.dirname(path))  # type: ignore[attr-defined]
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", "-R", path])
+            else:
+                subprocess.Popen(["xdg-open", os.path.dirname(path)])
+        except OSError as exc:
+            self._log(f"✗ 无法打开目录: {exc}")
+
+    def _row_actions(self, tab: str, task):
+        """任务行的「打开目录 / 移除」回调(点击时才解析当前路径)。"""
+
+        def on_open():
+            candidates = (
+                getattr(task, "file_path", ""),
+                getattr(task, "dst", ""),
+                getattr(task, "src", ""),
+                getattr(task, "url", ""),
+            )
+            for candidate in candidates:
+                if candidate and os.path.exists(candidate):
+                    self._reveal_path(candidate)
+                    return
+            messagebox.showinfo("提示", "文件还不存在(任务未完成或已失败)。")
+
+        def on_remove():
+            self._remove_task(tab, task)
+
+        return on_open, on_remove
+
+    def _remove_task(self, tab: str, task) -> None:
+        """把一个任务连同它的行移出队列(模块运行中不允许)。"""
+        queues = {
+            "download": (self.tasks, self.task_rows, self.task_row_map, "download"),
+            "convert": (self.cv_tasks, self.cv_rows, self.cv_row_map, "convert"),
+            "ncm": (self.ncm_tasks, self.ncm_rows, self.ncm_row_map, "ncm"),
+            "video": (self.va_tasks, self.va_rows, self.va_row_map, "video"),
+        }
+        tasks, rows, row_map, name = queues[tab]
+        if name in self._running_jobs:
+            messagebox.showinfo("任务进行中", "批次运行中不能移除任务,请先等批次结束或点取消。")
+            return
+        row = row_map.pop(id(task), None)
+        if row is not None:
+            row.frame.destroy()
+            if row in rows:
+                rows.remove(row)
+        if task in tasks:
+            tasks.remove(task)
+        if not tasks:
+            self._show_empty_hint(tab)
 
     def _require_idle(self, name: str, label: str) -> bool:
         if name not in self._running_jobs:
@@ -1052,7 +1146,8 @@ class App(ctk.CTk):
             dst = converter.build_output_path(f, out_dir, fmt, reserved)
             task = converter.ConvertTask(src=f, dst=dst, fmt=fmt)
             self.va_tasks.append(task)
-            row = TaskRow(self.va_container, task)
+            open_cb, remove_cb = self._row_actions("video", task)
+            row = TaskRow(self.va_container, task, on_open=open_cb, on_remove=remove_cb)
             row.title_lbl.configure(text=os.path.basename(f), width=400)
             row.status_lbl.configure(text="排队中")
             self.va_rows.append(row)
@@ -1092,7 +1187,8 @@ class App(ctk.CTk):
         for url in urls:
             task = downloader.DownloadTask(url=url, out_dir=out_dir, fmt=kind, title=url)
             self.va_tasks.append(task)
-            row = TaskRow(self.va_container, task)
+            open_cb, remove_cb = self._row_actions("video", task)
+            row = TaskRow(self.va_container, task, on_open=open_cb, on_remove=remove_cb)
             row.title_lbl.configure(text=url, width=400)
             self.va_rows.append(row)
             self.va_row_map[id(task)] = row
@@ -2219,7 +2315,8 @@ class App(ctk.CTk):
                 task.sample_rate = sample_rate
                 self._reset_task_for_run(task)
                 self.tasks.append(task)
-                row = TaskRow(self.task_container, task)
+                open_cb, remove_cb = self._row_actions("download", task)
+                row = TaskRow(self.task_container, task, on_open=open_cb, on_remove=remove_cb)
                 self.task_rows.append(row)
                 self.task_row_map[id(task)] = row
                 threading.Thread(target=self._download_worker, args=(task,), daemon=True).start()
@@ -2353,7 +2450,8 @@ class App(ctk.CTk):
 
     def _add_cv_row(self, task: converter.ConvertTask):
         self._hide_empty_hint("convert")
-        row = TaskRow(self.cv_container, task)
+        open_cb, remove_cb = self._row_actions("convert", task)
+        row = TaskRow(self.cv_container, task, on_open=open_cb, on_remove=remove_cb)
         row.title_lbl.configure(text=os.path.basename(task.src), width=400)
         row.status_lbl.configure(text="排队中")
         self.cv_rows.append(row)
@@ -2571,17 +2669,57 @@ class App(ctk.CTk):
         except tk.TclError:
             pass
 
-    # ---------- 界面语言 ----------
+    # ---------- 界面语言(热切换,无需重启) ----------
     def _toggle_language(self):
-        language = i18n.toggle_language()
-        if language == i18n.EN:
-            messagebox.showinfo(
-                "Language changed",
-                "The interface will switch to English after restarting the app.",
-            )
-        else:
-            messagebox.showinfo("语言已切换", "重启应用后界面将切换为中文。")
+        i18n.toggle_language()
+        self._retranslate_ui()
+
+    def _retranslate_ui(self):
+        """切换语言后原地重翻译全部控件文字。"""
+        self.title(f"{APP_NAME} v{APP_VERSION} · {i18n.tr('音乐抓取与无损转码工具')}")
         self.lang_btn.configure(text=i18n.toggle_label())
+        self._retranslate_widget(self)
+        # OptionMenu 的显示走 StringVar,重建 values 后变量也要跟上。
+        for var in (
+            self.fmt_var, self.decrypt_fmt_label_var, self.decrypt_exists_label_var,
+            self.am_codec_label_var, self.bp_quality_label_var,
+        ):
+            var.set(i18n.tr(i18n.untr(var.get())))
+        for label_var in (
+            self.dl_rate_label_var, self.cv_rate_label_var,
+            self.ncm_rate_label_var, self.va_rate_label_var,
+        ):
+            label_var.set(i18n.tr(i18n.untr(label_var.get())))
+        self._log(i18n.tr("语言已切换,即时生效"))
+
+    def _retranslate_widget(self, widget):
+        """递归把控件上的静态文字换成当前语言。
+
+        tr(untr(x)) 对路径、文件名等未收录原文是恒等变换,动态内容安全。
+        """
+        try:
+            children = widget.winfo_children()
+        except Exception:  # noqa: BLE001 - 非 Tk 对象
+            children = []
+        for child in children:
+            self._retranslate_widget(child)
+        kind = type(widget).__name__
+        try:
+            if kind in ("CTkLabel", "CTkButton", "CTkSwitch", "CTkCheckBox", "CTkRadioButton"):
+                widget.configure(text=i18n.tr(i18n.untr(widget.cget("text"))))
+            elif kind == "CTkEntry":
+                widget.configure(
+                    placeholder_text=i18n.tr(i18n.untr(widget.cget("placeholder_text")))
+                )
+            elif kind == "CTkOptionMenu":
+                values = [i18n.tr(i18n.untr(v)) for v in widget.cget("values") or []]
+                if values:
+                    widget.configure(values=values)
+            elif kind == "CTkTabview":
+                for key, button in (widget._segmented_button._buttons_dict or {}).items():
+                    button.configure(text=i18n.tr(i18n.untr(key)))
+        except Exception:  # noqa: BLE001 - 个别控件不支持时跳过
+            pass
 
     # ---------- 更新检查 ----------
     def _set_update_ui(self, *, busy: bool, status: str = ""):
@@ -2677,12 +2815,15 @@ class App(ctk.CTk):
         else:
             row.progress.set(task.progress / 100.0)
 
-    def _set_total_progress(self, bar, label, payload) -> None:
-        """更新总进度条与百分比文字; payload 兼容 (done, total) 与 0~1 比例。"""
+    def _set_total_progress(self, bar, label, payload, tasks=None) -> None:
+        """更新总进度条与百分比文字; tasks 传入时附带失败计数。"""
         if isinstance(payload, tuple) and len(payload) == 2:
             done, total = payload
+            failed = 0
+            if tasks:
+                failed = sum(1 for t in tasks if getattr(t, "status", "") == "失败")
+            text = format_total_text(done, total, failed)
             ratio = (done / total) if total else 0.0
-            text = f"{done}/{total} · {ratio * 100:.0f}%"
         else:
             ratio = float(payload or 0.0)
             text = f"{ratio * 100:.0f}%"
@@ -2695,7 +2836,8 @@ class App(ctk.CTk):
         self._hide_empty_hint("ncm")
         chunk, rest = tasks[:batch], tasks[batch:]
         for task in chunk:
-            row = TaskRow(self.ncm_container, task)
+            open_cb, remove_cb = self._row_actions("ncm", task)
+            row = TaskRow(self.ncm_container, task, on_open=open_cb, on_remove=remove_cb)
             row.title_lbl.configure(text=os.path.basename(task.src), width=400)
             self.ncm_rows.append(row)
             self.ncm_row_map[id(task)] = row
@@ -2735,7 +2877,8 @@ class App(ctk.CTk):
                     self._row_for(self.cv_row_map, msg[1], "progress")
                 elif kind == "cv_total":
                     self._set_total_progress(
-                        self.cv_progress_bar, self.cv_progress_label, msg[1]
+                        self.cv_progress_bar, self.cv_progress_label, msg[1],
+                        tasks=self.cv_tasks,
                     )
                 elif kind == "ncm_refresh":
                     self._row_for(self.ncm_row_map, msg[1], "refresh")
@@ -2743,7 +2886,8 @@ class App(ctk.CTk):
                     self._row_for(self.ncm_row_map, msg[1], "progress")
                 elif kind == "ncm_total":
                     self._set_total_progress(
-                        self.ncm_progress_bar, self.ncm_progress_label, msg[1]
+                        self.ncm_progress_bar, self.ncm_progress_label, msg[1],
+                        tasks=self.ncm_tasks,
                     )
                 elif kind == "va_refresh":
                     self._row_for(self.va_row_map, msg[1], "refresh")
@@ -2751,7 +2895,8 @@ class App(ctk.CTk):
                     self._row_for(self.va_row_map, msg[1], "progress")
                 elif kind == "va_total":
                     self._set_total_progress(
-                        self.va_progress_bar, self.va_progress_label, msg[1]
+                        self.va_progress_bar, self.va_progress_label, msg[1],
+                        tasks=self.va_tasks,
                     )
                 elif kind == "premium_status":
                     service, text = msg[1], msg[2]

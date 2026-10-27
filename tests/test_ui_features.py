@@ -164,5 +164,32 @@ class BatchExecutorTests(unittest.TestCase):
         self.assertEqual(len(end_jobs), 5, "取消路径同样每个任务对账一次")
 
 
+class TotalProgressTextTests(unittest.TestCase):
+    """总进度标签文字:双语、失败计数。"""
+
+    def setUp(self):
+        self._original = __import__("i18n").current_language()
+
+    def tearDown(self):
+        __import__("i18n").set_language(self._original)
+
+    def test_zh_text(self):
+        import i18n
+        import main
+
+        i18n.set_language(i18n.ZH)
+        self.assertEqual(main.format_total_text(3, 10, 0), "3/10 · 30%")
+        self.assertEqual(main.format_total_text(3, 10, 2), "3/10 · 30% · 失败 2")
+        self.assertEqual(main.format_total_text(0, 0, 0), "0/0 · 0%")
+
+    def test_en_text(self):
+        import i18n
+        import main
+
+        i18n.set_language(i18n.EN)
+        self.assertEqual(main.format_total_text(3, 10, 0), "3/10 · 30%")
+        self.assertEqual(main.format_total_text(3, 10, 2), "3/10 · 30% · failed 2")
+
+
 if __name__ == "__main__":
     unittest.main()
