@@ -29,6 +29,8 @@ _language = ZH
 _EN = {
     # 通用
     "音乐抓取与无损转码工具": "Music downloader & lossless converter",
+    "支持网易云 .ncm 与 QQ 音乐加密文件(.qmc*/.mflac/.mgg 等),本地还原并写入标签/封面,不上传文件;请只处理你拥有或明确获授权的内容。musicex 新格式(2024 起)需 QQ 音乐客户端在线取密钥,无法离线解密。":
+        "Supports NetEase .ncm and QQ Music encrypted files (.qmc*/.mflac/.mgg ...). Decrypted locally with tags/cover written; nothing is uploaded — only process content you own or are authorized to use. The newer musicex format (2024+) fetches keys online via the QQ Music client and cannot be decrypted offline.",
     "下载 · 转码 · 本地还原": "Download · Convert · Decrypt",
     "活动日志": "Activity log",
     "检查更新": "Check for updates",

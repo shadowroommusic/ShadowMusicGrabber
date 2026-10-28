@@ -1278,10 +1278,9 @@ class App(ctk.CTk):
         self._guide(
             parent,
             "解密 · 网易云 NCM 与 QQ 音乐加密文件",
-            "支持网易云音乐下载得到的 .ncm 与 QQ 音乐加密文件(.qmc0/.qmc3/.qmcflac/.qmcogg,以及 .mflac/.mgg 等)。"
-            "步骤:选择输出目录 → 添加一个或多个加密文件 → 点“开始解密”。程序会在本地还原音频;NCM 会尽力写入歌曲名、歌手、专辑和封面,QQ 音乐文件自带标签会保留。"
-            "不会上传文件;请只处理你拥有或明确获授权的内容。"
-            "若文件使用 QQ 音乐 musicex 新版权保护(2024 起部署),密钥由 QQ 音乐服务器在登录态动态下发,本工具作为离线解密器无法处理,请改用 QQ 音乐客户端播放。",
+            "支持网易云 .ncm 与 QQ 音乐加密文件(.qmc*/.mflac/.mgg 等),本地还原并写入标签/封面,"
+            "不上传文件;请只处理你拥有或明确获授权的内容。"
+            "musicex 新格式(2024 起)需 QQ 音乐客户端在线取密钥,无法离线解密。",
         )
 
         row = ctk.CTkFrame(parent, fg_color="transparent")
@@ -1293,23 +1292,6 @@ class App(ctk.CTk):
             fg_color="#0f0f10", border_color=BORDER, text_color=TEXT,
         ).pack(side="left", fill="x", expand=True, padx=6)
         self._button(row, "浏览…", self._pick_ncm_out, width=78).pack(side="left")
-
-        fmt_row = ctk.CTkFrame(parent, fg_color="transparent")
-        fmt_row.pack(fill="x", padx=10, pady=(0, 4))
-        ctk.CTkLabel(fmt_row, text="输出格式:").pack(side="left")
-        decrypt_labels = [i18n.tr(label) for label in DECRYPT_FORMAT_LABELS]
-        # 下拉框显示译文，取值必须用原文标签映射。
-        self.decrypt_fmt_var = ctk.StringVar(value="original")
-        self.decrypt_fmt_label_var = ctk.StringVar(value=decrypt_labels[0])
-        ctk.CTkOptionMenu(
-            fmt_row, width=300,
-            values=decrypt_labels,
-            variable=self.decrypt_fmt_label_var,
-            command=self._on_decrypt_fmt_change,
-            fg_color=BUTTON, button_color=BUTTON,
-            button_hover_color=BUTTON_HOVER, dropdown_fg_color=PANEL_ALT,
-            dropdown_hover_color=BUTTON_HOVER, text_color=TEXT,
-        ).pack(side="left", padx=6)
         self._button(
             row,
             "打开目录",
@@ -1317,13 +1299,28 @@ class App(ctk.CTk):
             width=92,
         ).pack(side="left", padx=(6, 0))
 
-        rate_row = ctk.CTkFrame(parent, fg_color="transparent")
-        rate_row.pack(fill="x", padx=10, pady=(0, 4))
-        ctk.CTkLabel(rate_row, text="采样率:").pack(side="left")
+        # 三个下拉并排一行,压缩纵向空间(此前各占一行,把总进度和日志挤出窗口)。
+        opts_row = ctk.CTkFrame(parent, fg_color="transparent")
+        opts_row.pack(fill="x", padx=10, pady=(0, 4))
+        ctk.CTkLabel(opts_row, text="输出格式:").pack(side="left")
+        decrypt_labels = [i18n.tr(label) for label in DECRYPT_FORMAT_LABELS]
+        # 下拉框显示译文，取值必须用原文标签映射。
+        self.decrypt_fmt_var = ctk.StringVar(value="original")
+        self.decrypt_fmt_label_var = ctk.StringVar(value=decrypt_labels[0])
+        ctk.CTkOptionMenu(
+            opts_row, width=170,
+            values=decrypt_labels,
+            variable=self.decrypt_fmt_label_var,
+            command=self._on_decrypt_fmt_change,
+            fg_color=BUTTON, button_color=BUTTON,
+            button_hover_color=BUTTON_HOVER, dropdown_fg_color=PANEL_ALT,
+            dropdown_hover_color=BUTTON_HOVER, text_color=TEXT,
+        ).pack(side="left", padx=6)
+        ctk.CTkLabel(opts_row, text="采样率:").pack(side="left", padx=(14, 0))
         self.ncm_rate_var = ctk.StringVar(value="")
         self.ncm_rate_label_var = ctk.StringVar(value=CV_SAMPLE_RATE_LABELS[""])
         ctk.CTkOptionMenu(
-            rate_row, width=170,
+            opts_row, width=150,
             values=[CV_SAMPLE_RATE_LABELS[c] for c in CV_SAMPLE_RATE_CHOICES],
             variable=self.ncm_rate_label_var,
             command=self._on_ncm_rate_change,
@@ -1331,20 +1328,13 @@ class App(ctk.CTk):
             button_hover_color=BUTTON_HOVER, dropdown_fg_color=PANEL_ALT,
             dropdown_hover_color=BUTTON_HOVER, text_color=TEXT,
         ).pack(side="left", padx=6)
-        self.ncm_rate_hint = ctk.CTkLabel(
-            rate_row, text=self._cv_rate_hint(""), anchor="w", text_color=MUTED,
-        )
-        self.ncm_rate_hint.pack(side="left", padx=(12, 0))
-
-        exists_row = ctk.CTkFrame(parent, fg_color="transparent")
-        exists_row.pack(fill="x", padx=10, pady=(0, 4))
-        ctk.CTkLabel(exists_row, text="同名文件:").pack(side="left")
+        ctk.CTkLabel(opts_row, text="同名文件:").pack(side="left", padx=(14, 0))
         self.decrypt_exists_var = ctk.StringVar(value="rename")
         self.decrypt_exists_label_var = ctk.StringVar(
             value=i18n.tr("自动改名（不覆盖）")
         )
         ctk.CTkOptionMenu(
-            exists_row, width=190,
+            opts_row, width=170,
             values=[i18n.tr(label) for label in DECRYPT_EXISTS_LABELS],
             variable=self.decrypt_exists_label_var,
             command=self._on_exists_change,
@@ -1353,16 +1343,17 @@ class App(ctk.CTk):
             dropdown_hover_color=BUTTON_HOVER, text_color=TEXT,
         ).pack(side="left", padx=6)
         ctk.CTkLabel(
-            exists_row,
+            opts_row,
             text="· 跳过可避免重复生成 _1/_2",
             anchor="w", text_color=MUTED, font=ctk.CTkFont(size=12),
-        ).pack(side="left", padx=(10, 0))
+        ).pack(side="left", padx=(8, 0))
 
-        opt_row = ctk.CTkFrame(parent, fg_color="transparent")
-        opt_row.pack(fill="x", padx=10, pady=(0, 4))
+        # 两个开关一行;AcoustID Key(仅指纹识别用)与其状态一行。
+        switch_row = ctk.CTkFrame(parent, fg_color="transparent")
+        switch_row.pack(fill="x", padx=10, pady=(0, 4))
         self.rename_var = ctk.BooleanVar(value=True)
         ctk.CTkSwitch(
-            opt_row,
+            switch_row,
             text="按“歌手 - 歌名”重命名输出文件",
             variable=self.rename_var,
             command=self._on_rename_toggle,
@@ -1373,17 +1364,9 @@ class App(ctk.CTk):
             button_color=TEXT,
             button_hover_color=TEXT,
         ).pack(side="left")
-        ctk.CTkLabel(
-            opt_row,
-            text="· 取不到歌名时维持原文件名",
-            anchor="w", text_color=MUTED, font=ctk.CTkFont(size=12),
-        ).pack(side="left", padx=(10, 0))
-
-        fp_row = ctk.CTkFrame(parent, fg_color="transparent")
-        fp_row.pack(fill="x", padx=10, pady=(0, 4))
         self.fp_var = ctk.BooleanVar(value=False)
         ctk.CTkSwitch(
-            fp_row,
+            switch_row,
             text="标签缺失时用声学指纹联网识别",
             variable=self.fp_var,
             command=self._on_fingerprint_toggle,
@@ -1393,19 +1376,14 @@ class App(ctk.CTk):
             fg_color=BUTTON,
             button_color=TEXT,
             button_hover_color=TEXT,
-        ).pack(side="left")
-        self.fp_status = ctk.CTkLabel(
-            fp_row, text=self._fingerprint_status_text(), anchor="w",
-            text_color=MUTED, font=ctk.CTkFont(size=12),
-        )
-        self.fp_status.pack(side="left", padx=(10, 0))
+        ).pack(side="left", padx=(18, 0))
 
         key_row = ctk.CTkFrame(parent, fg_color="transparent")
         key_row.pack(fill="x", padx=10, pady=(0, 4))
         ctk.CTkLabel(key_row, text="AcoustID Key:").pack(side="left")
         self.fp_key_var = ctk.StringVar(value="")
         ctk.CTkEntry(
-            key_row, textvariable=self.fp_key_var, width=300, show="*",
+            key_row, textvariable=self.fp_key_var, width=260, show="*",
             placeholder_text="在 acoustid.org 用 MusicBrainz 账号登录获取",
             fg_color="#0f0f10", border_color=BORDER, text_color=TEXT,
         ).pack(side="left", padx=6)
@@ -1414,6 +1392,11 @@ class App(ctk.CTk):
             "write",
             lambda *_: setattr(self, "fingerprint_key", self.fp_key_var.get().strip()),
         )
+        self.fp_status = ctk.CTkLabel(
+            key_row, text=self._fingerprint_status_text(), anchor="w",
+            text_color=MUTED, font=ctk.CTkFont(size=12),
+        )
+        self.fp_status.pack(side="left", padx=(10, 0))
 
         btn_frame = ctk.CTkFrame(parent, fg_color="transparent")
         btn_frame.pack(fill="x", padx=10, pady=6)
@@ -1440,7 +1423,7 @@ class App(ctk.CTk):
             text_color=MUTED, font=ctk.CTkFont(size=12),
         )
         self.ncm_drop_hint.pack(side="left", padx=(8, 0))
-        self.ncm_container = ctk.CTkScrollableFrame(list_frame, fg_color="#0f0f10")
+        self.ncm_container = ctk.CTkScrollableFrame(list_frame, fg_color="#0f0f10", height=170)
         self.ncm_container.pack(fill="both", expand=True, padx=6, pady=6)
 
         # 拖入即入队；拖放库不可用时自动降级为“仅按钮添加”。
@@ -1471,9 +1454,9 @@ class App(ctk.CTk):
         )
         self.ncm_progress_label.pack(side="right")
         self.ncm_progress_bar = ctk.CTkProgressBar(
-            parent, height=10, fg_color="#303035", progress_color=ACCENT
+            parent, height=8, fg_color="#303035", progress_color=ACCENT
         )
-        self.ncm_progress_bar.pack(fill="x", padx=10, pady=(0, 10))
+        self.ncm_progress_bar.pack(fill="x", padx=10, pady=(0, 6))
         self.ncm_progress_bar.set(0)
         try:  # 固定滚动步长, 减少拖动滚动条时的大量重绘
             self.ncm_container._parent_canvas.configure(yscrollincrement=20)
